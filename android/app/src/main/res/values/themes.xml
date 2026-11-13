@@ -4,6 +4,9 @@
     <style name="Theme.Menhir" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@color/window</item>
         <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <!-- The platform splash: the standing stone on the home screen's background. MainActivity animates it away. -->
+        <item name="android:windowSplashScreenBackground">@color/window</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_launcher</item>
     </style>
     <!-- The session is always black, whatever the system theme. -->
     <style name="Theme.Menhir.Session" parent="android:Theme.Material.NoActionBar">

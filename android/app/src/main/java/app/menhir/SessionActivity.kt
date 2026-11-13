@@ -14,7 +14,12 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -111,6 +116,9 @@ class SessionActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // The home screen grows the Mac's screen to full black before this opens and shrinks it after; no window animation between.
+        overrideActivityTransition(OVERRIDE_TRANSITION_OPEN, 0, 0)
+        overrideActivityTransition(OVERRIDE_TRANSITION_CLOSE, 0, 0)
         val id = intent.getStringExtra(MAC_ID) ?: Session.mac?.id
         val found = id?.let { Machines.get(it) }
         if (found == null) {
@@ -149,6 +157,11 @@ class SessionActivity : ComponentActivity() {
 
         if (Session.mac?.id == mac.id && Session.active) engineState = Engine.state() else boot()
         lifecycleScope.launch { watch() }
+    }
+
+    override fun finish() {
+        HeroLaunch.pending = !reduceMotion()
+        super.finish()
     }
 
     override fun onDestroy() {
@@ -366,7 +379,13 @@ class SessionActivity : ComponentActivity() {
                         controls = false
                         lifecycleScope.launch { Sharing.typeSlowly(EngineInput, Sharing.SET_UP_COMMAND) }
                     }
-                    BarButton("Macs") { startActivity(Intent(this@SessionActivity, MainActivity::class.java)) }
+                    BarButton("Home") {
+                        HeroLaunch.pending = !reduceMotion()
+                        startActivity(
+                            Intent(this@SessionActivity, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT),
+                            android.app.ActivityOptions.makeCustomAnimation(this@SessionActivity, 0, 0).toBundle(),
+                        )
+                    }
                     VerticalDivider(Modifier.height(24.dp).padding(horizontal = Space.xs), color = MaterialTheme.colorScheme.outlineVariant)
                     BarButton("Stop", "stop", MaterialTheme.colorScheme.error) { confirmStop = true }
                     Button(onClick = { controls = false }, modifier = Modifier.heightIn(min = 48.dp)) { Text("Done") }
@@ -429,8 +448,12 @@ class SessionActivity : ComponentActivity() {
         tag: String = label,
         labelColor: Color = Color.White,
     ) {
+        val shown by animateColorAsState(color, spring(dampingRatio = 0.8f, stiffness = 900f), label = "key")
+        val lit = color == KeyOn
+        val scale by animateFloatAsState(if (lit) 1.06f else 1f, Springs.snappy(), label = "keyScale")
         Box(
-            Modifier.width(width).height(48.dp).background(color, RoundedCornerShape(10.dp)).testTag("key-$tag").then(modifier),
+            Modifier.width(width).height(48.dp).graphicsLayer { scaleX = scale; scaleY = scale }
+                .background(shown, RoundedCornerShape(10.dp)).testTag("key-$tag").then(modifier),
             contentAlignment = Alignment.Center,
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -460,10 +483,14 @@ class SessionActivity : ComponentActivity() {
     @Composable
     private fun StickyKey(symbol: String, name: String, code: Int) {
         val on = code in stickyDown
+        val view = LocalView.current
         KeyCap(
             symbol, name, if (on) KeyOn else KeyUp, KeyWide,
             Modifier.semantics { stateDescription = if (on) "on" else "off" }.pointerInput(code) {
-                detectTapGestures { sticky.toggle(code) }
+                detectTapGestures {
+                    view.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+                    sticky.toggle(code)
+                }
             },
             name,
         )

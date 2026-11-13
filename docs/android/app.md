@@ -18,7 +18,7 @@ The default build uses `android/native/fake_vm.c` and `fake_fetch.c` in place of
 and the downloader (CMake `MENHIR_FAKE_ENGINE=ON`). It simulates the machine: start, stop,
 pause, a restore through the real step numbers in about 20 seconds, a saved Mac as a small
 text file, and a moving test pattern with the fingers, pointer, buttons and last key drawn on
-it. Every input call is logged under the logcat tag `menhir-fake`. The Macs screen says
+it. Every input call is logged under the logcat tag `menhir-fake`. The home screen says
 "Test build" when this engine is in use. Nothing is downloaded and no macOS runs.
 
 `./gradlew -PmenhirFakeEngine=false assembleDebug` builds the real variant. It adds
@@ -56,12 +56,30 @@ It survives app updates and can be reached with `adb shell`. Android bind-mounts
 
 ## Macs and install
 
-The Macs screen follows the system's light or dark theme (`Theme.kt`). Macs show as a grid of
-cards (name, macOS version, memory, CPUs, disk, state) with Start or Install macOS, and Delete,
-which asks first. The install's progress, notices and downloaded installers sit in a side pane.
+The home screen is built around one Mac: the first in `machines.json`. Any others are ignored.
+It follows the system's light or dark theme (`Theme.kt`) and shows one state at a time:
 
-New Mac asks for a name, memory (4, 6 or 8 GB), CPUs, disk size (48 to 128 GB) and a macOS
-version from `Installer.swift`'s list, then installs straight away. The steps are: fetch the
+- **Set up** (no Mac, or macOS not installed): memory (4, 6 or 8 GB), CPUs, disk size (48 to
+  128 GB) and a macOS version from `Installer.swift`'s list, with defaults chosen, and
+  Download and install.
+- **Installing**: the step, its progress, bytes and percent, an estimate of the time left
+  while downloading, and Stop download.
+- **Failed**: the reason in plain words and Try again.
+- **Ready**: the Mac (name, macOS, memory, CPUs, disk used) with Start, or Restart Menhir
+  when this process has already run a Mac. More holds Memory and CPUs, Reinstall macOS and
+  Delete Mac; the last two ask first.
+- **Running or paused**: Resume and Stop, which asks first.
+
+Settings (top right) holds the update token and version, and the downloaded installers. The
+update pill sits beside it.
+
+Motion lives in `Motion.kt`: springs, a staggered entrance, a platform splash screen
+(`themes.xml`) that MainActivity animates away, content transitions between the states, a
+sliding segmented control, and a press dip with a haptic tick on primary buttons. Start grows
+the Mac's screen to full black before the session opens, and the session shrinks back into it
+when it closes. With Remove animations on, the delays and the launch overlay are skipped.
+
+The install The steps are: fetch the
 boot ROM, download the IPSW (it resumes a `.part` file and retries 20 times), make the
 machine's files, then run `henge_vm_install`. The restore gets 2 to 4 GB whatever the Mac's
 own memory is, as on iOS. Progress comes from `henge_install_step` and
@@ -69,8 +87,8 @@ own memory is, as on iOS. Progress comes from `henge_install_step` and
 from there.
 
 The install runs in the app process with a partial wake lock and a foreground service, so it
-goes on with the screen off. A Mac whose install failed stays in the list as "macOS not
-installed", with Install macOS and Delete. The engine runs one machine per process, and an
+goes on with the screen off. A Mac whose install failed returns to Set up with its settings
+kept. The engine runs one machine per process, and an
 install leaves its restore stack attached. Afterwards the app offers Restart Menhir, which
 starts a new process.
 
@@ -88,8 +106,8 @@ so the image fills the panel with no bars. A density outside 90 to 700 ppi gives
 passes NULL before it returns. The surface is destroyed whenever the app leaves the screen.
 
 Four fingers tapped together, or Back, show the controls, a bar at the top: Keyboard, Paste,
-Type setup command, Macs, Stop and Done. Stop asks first. With the keyboard up, a compact key
-row floats above it: esc, tab, ⌃ ⌥ ⌘ (lit while held for the next key), the arrows and hide.
+Type setup command, Home, Stop and Done. Stop asks first. With the keyboard up, a compact key
+row floats above it: esc, tab, ⌃ ⌥ ⌘ (lit with a short spring while held for the next key), the arrows and hide.
 Every key is at least 48 dp. The session is always dark. When macOS stops, the reason is shown. A
 restart that macOS asked for starts the Mac again, as on iOS.
 
@@ -140,8 +158,8 @@ to the Mac's trackpad, so macOS does the gestures. Its physical click is `henge_
 
 - A foreground service (type `specialUse`) with a notification runs while a Mac is running or
   paused, or macOS is installing. Notifications need the permission the app asks for at the
-  first New Mac or Start. The service still runs without it.
-- The Macs screen offers Allow background use while Android still optimises the app's battery
+  first install or Start. The service still runs without it.
+- The home screen offers Allow background use while Android still optimises the app's battery
   use.
 - Before a start, the app compares the Mac's memory plus 1 GB with what Android has free
   (`ActivityManager.MemoryInfo.availMem`) and warns if it does not fit.
@@ -242,7 +260,7 @@ Needs the graphics backend: any picture at all.
 
 ## Updates
 
-On the Macs screen, paste a fine-grained GitHub token into Update token and save it once.
+In Settings on the home screen, paste a fine-grained GitHub token into Update token and save it once.
 Limit it to `shirishpothi/Menhir` with read-only Contents. It stays in no-backup storage,
 never in the APK or repository. Replace it there when it expires. The screen shows the
 installed version and last check result. Checks run on arrival (at most every 30 seconds),

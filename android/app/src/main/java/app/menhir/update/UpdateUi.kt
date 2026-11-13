@@ -3,6 +3,7 @@ package app.menhir.update
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -22,7 +23,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import app.menhir.*
 import kotlinx.coroutines.*
 
-/** Checks only while the Macs screen is visible; installs outlive that screen. */
+/** Checks only while the home screen is visible; installs outlive that screen. */
 @Composable
 fun WatchForUpdates() {
     val context = LocalContext.current.applicationContext
@@ -70,9 +71,10 @@ fun UpdatePill() {
         else -> 0f
     }
     val fill = MaterialTheme.colorScheme.primary.copy(alpha = .22f)
-    Box(Modifier.padding(end = Space.m).clip(RoundedCornerShape(50))
+    val shown by androidx.compose.animation.core.animateFloatAsState(progress, Springs.move(), label = "updateFill")
+    Box(Modifier.padding(end = Space.m).animateContentSize(Springs.move()).clip(RoundedCornerShape(50))
         .background(MaterialTheme.colorScheme.secondaryContainer)
-        .drawBehind { drawRect(fill, size = size.copy(width = size.width * progress.coerceIn(0f, 1f))) }
+        .drawBehind { drawRect(fill, size = size.copy(width = size.width * shown.coerceIn(0f, 1f))) }
         .clickable(enabled = release != null) {
             // Application scope: leaving this screen must not interrupt an install session.
             release?.let { Thread({ Updater.install(context, it) }, "menhir-update").start() }
