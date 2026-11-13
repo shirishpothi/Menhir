@@ -24,7 +24,9 @@ typedef struct {
 const MenhirRelease *menhir_releases(size_t *count);
 /* Return NULL on invalid arguments/allocation/thread failure. Destination must
  * have an existing parent. Writes destination.part, fsyncs, then renames.
- * IPSW resumes a previous .part. ROM verifies SHA-256 even for cached files.
+ * Each IPSW destination must identify one immutable URL (use the build ID).
+ * IPSW reuses a completed file or resumes its .part; it has no upstream hash.
+ * ROM verifies SHA-256 even for cached files.
  * ca_directory: NULL uses Android system roots; desktop callers supply a CA
  * directory (or build curl with a default bundle). HTTPS is mandatory. */
 MenhirFetch *menhir_fetch_rom(const char *destination, const char *ca_directory);

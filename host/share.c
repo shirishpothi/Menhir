@@ -10,13 +10,22 @@
    Locks are accepted but not enforced: macOS only writes to a server that offers them, and there is one client. */
 #include "share.h"
 
+#if defined(__APPLE__)
 #include <copyfile.h>
+#else
+#include "compat_android.h"
+#include <sys/vfs.h>
+#define st_mtimespec st_mtim
+#define st_birthtimespec st_ctim
+#endif
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <pthread.h>
+#if defined(__APPLE__)
 #include <removefile.h>
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -144,7 +153,13 @@ static void add_url(Text *t, const char *s) {
 static int send_all(int fd, const void *p, size_t n) {
     const char *c = p;
     while (n) {
-        ssize_t w = send(fd, c, n, 0);
+        ssize_t w = send(fd, c, n,
+#ifdef MSG_NOSIGNAL
+                         MSG_NOSIGNAL
+#else
+                         0
+#endif
+        );
         if (w < 0 && errno == EINTR) continue;
         if (w <= 0) return -1;
         c += w, n -= (size_t)w;
@@ -507,7 +522,13 @@ static int do_put(Conn *c, Request *r) {
 static int remove_path(const char *local) {
     struct stat st;
     if (lstat(local, &st) != 0) return -1;
-    if (S_ISDIR(st.st_mode)) return removefile(local, NULL, REMOVEFILE_RECURSIVE);
+    if (S_ISDIR(st.st_mode)) {
+#if defined(__APPLE__)
+        return removefile(local, NULL, REMOVEFILE_RECURSIVE);
+#else
+        return menhir_remove_tree(local);
+#endif
+    }
     return unlink(local);
 }
 
@@ -540,7 +561,12 @@ static int do_move_copy(Conn *c, Request *r, int move) {
     int existed = stat(to, &st) == 0;
     if (existed && !r->overwrite) return respond_empty(c, r, 412, "Precondition Failed");
     if (existed && strcmp(from, to) != 0 && remove_path(to) != 0) return respond_empty(c, r, 403, "Forbidden");
-    int rc = move ? rename(from, to) : copyfile(from, to, NULL, COPYFILE_ALL | COPYFILE_RECURSIVE);
+    int rc = move ? rename(from, to) :
+#if defined(__APPLE__)
+        copyfile(from, to, NULL, COPYFILE_ALL | COPYFILE_RECURSIVE);
+#else
+        menhir_copy_tree(from, to);
+#endif
     if (rc != 0) return errno == ENOENT ? respond_empty(c, r, 409, "Conflict") : respond_empty(c, r, 403, "Forbidden");
     return existed ? respond_empty(c, r, 204, "No Content") : respond_empty(c, r, 201, "Created");
 }
@@ -862,7 +888,11 @@ static void *listener(void *arg) {
             continue;
         }
         int on = 1;
+#if defined(SO_NOSIGPIPE)
         setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof on);
+#else
+        (void)on;
+#endif
         Conn *c = calloc(1, sizeof *c);
         c->fd = fd;
         pthread_t t;
