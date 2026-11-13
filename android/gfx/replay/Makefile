@@ -57,3 +57,14 @@ $(O)/aircc: android/gfx/tools/aircc.c $(AIR_OBJ)
 	$(CC) -std=c11 -O2 -g -Idevices/air $^ $(MESA_LIBS) $(LLVM)/lib/libLLVM.dylib -Wl,-rpath,$(LLVM)/lib -lz -o $@
 aircc: $(O)/aircc
 .PHONY: aircc
+
+# The Vulkan backend on the Mac (MoltenVK through Homebrew's Vulkan loader).
+VK = /opt/homebrew
+$(O)/vk/%.o: devices/%.c devices/*.h devices/air/*.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -Wno-unused-parameter -I$(VK)/include -c $< -o $@
+$(O)/pvg_replay_vulkan: $(COMMON) $(O)/vk/pvg_vulkan.o $(O)/vk/pvg_vulkan_desc.o $(filter-out $(O)/air/air_library.o,$(AIR_OBJ)) $(O)/air/air_library.o
+	$(CC) $(CFLAGS) $(COMMON) $(O)/vk/pvg_vulkan.o $(O)/vk/pvg_vulkan_desc.o $(AIR_OBJ) $(MESA_LIBS) $(LLVM)/lib/libLLVM.dylib \
+	  -Wl,-rpath,$(LLVM)/lib -L$(VK)/lib -lvulkan -Wl,-rpath,$(VK)/lib -lz -framework CoreFoundation -o $@
+vulkan: $(O)/pvg_replay_vulkan
+.PHONY: vulkan

@@ -1,7 +1,7 @@
 /* Replays a recording of the guest's GPU work (devices/pvg_vulkan_capture.h) through a graphics backend, off the
    device, and compares what the backend draws with what the recorded backend drew.
 
-     pvg_replay [--free] [--out DIR] [--quiet] CAPTURE.pvgcap
+     pvg_replay [--free] [--out DIR] [--quiet] [--frames N] CAPTURE.pvgcap
 
    The backend is whichever one the tool is linked with: pvg_metal.m (pvg_replay_metal, to check the rig itself) or
    pvg_vulkan.c (pvg_replay_vulkan). The machine is a stand-in: guest memory is filled from the recording's pages,
@@ -273,7 +273,7 @@ static uint64_t stamp_base;
 static int wait_stamp(uint32_t ch, uint32_t stamp) {
     uint32_t *s = stamp_base ? hv_phys_ptr(machine, stamp_base + 4ull * ch, 4) : NULL;
     if (!s) return 0;
-    for (int i = 0; i < 100000; i++) { /* 5 s */
+    for (int i = 0; i < 2400000; i++) { /* up to 120 s for cold shader compilation */
         if ((int32_t)(__atomic_load_n(s, __ATOMIC_ACQUIRE) - stamp) >= 0) return 0;
         usleep(50);
     }
@@ -281,17 +281,20 @@ static int wait_stamp(uint32_t ch, uint32_t stamp) {
 }
 
 int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    unsigned frame_limit = 0;
     int free_running = 0;
     const char *path = NULL;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--free")) free_running = 1;
         else if (!strcmp(argv[i], "--quiet")) quiet = 1;
         else if (!strcmp(argv[i], "--out") && i + 1 < argc) out_dir = argv[++i];
+        else if (!strcmp(argv[i], "--frames") && i + 1 < argc) frame_limit = (unsigned)strtoul(argv[++i], NULL, 10);
         else path = argv[i];
     }
     if (getenv("HV_REPLAY_TOL")) tolerance = atoi(getenv("HV_REPLAY_TOL"));
     if (!path) {
-        fprintf(stderr, "usage: pvg_replay [--free] [--out DIR] [--quiet] CAPTURE.pvgcap\n");
+        fprintf(stderr, "usage: pvg_replay [--free] [--out DIR] [--quiet] [--frames N] CAPTURE.pvgcap\n");
         return 2;
     }
     if (out_dir) mkdir(out_dir, 0755);
@@ -315,9 +318,12 @@ int main(int argc, char **argv) {
         case HV_PVGCAP_HEADER: {
             uint32_t version, n;
             memcpy(&version, r.data, 4), memcpy(&n, r.data + 4, 4);
-            if (version != HV_PVGCAP_VERSION || n > HV_MAX_RAM || r.len < 8 + 16ull * n + 8) { fprintf(stderr, "pvg_replay: version %u, %u regions\n", version, n); return 2; }
-            uint64_t cpus;
-            memcpy(&cpus, r.data + 8 + 16 * n, 8);
+            if (version < 1 || version > HV_PVGCAP_VERSION || n > HV_MAX_RAM || r.len < 8 + 16ull * n + (version >= 2 ? 8 : 0)) {
+                fprintf(stderr, "pvg_replay: version %u, %u regions\n", version, n);
+                return 2;
+            }
+            uint64_t cpus = 0; /* version 1 did not say */
+            if (version >= 2) memcpy(&cpus, r.data + 8 + 16 * n, 8);
             guess_writers = cpus != 1;
             if (guess_writers)
                 fprintf(stderr, "pvg_replay: recorded with %llu CPUs: a page this backend failed to write can pass as the guest's\n", (unsigned long long)cpus);
@@ -378,7 +384,7 @@ int main(int argc, char **argv) {
             hv_pvg_metal_submit(backend, lite, ch, cmd, len);
             if (wait_stamp(ch, stamp)) {
                 st.timeouts++;
-                fprintf(stderr, "pvg_replay: command %u (channel %u op %x) not completed in 5 s\n", seq, ch, op);
+                fprintf(stderr, "pvg_replay: command %u (channel %u op %x) not completed in 120 s\n", seq, ch, op);
             }
             st.commands++;
             break;
@@ -394,6 +400,7 @@ int main(int argc, char **argv) {
             break;
         case HV_PVGCAP_FRAME:
             compare_frame(lite, r.data, r.len, &st);
+            if (frame_limit && st.frames >= frame_limit) goto done;
             break;
         case HV_PVGCAP_END:
             break;
@@ -401,6 +408,7 @@ int main(int argc, char **argv) {
             fprintf(stderr, "pvg_replay: record type %u skipped\n", r.type);
         }
     }
+done:
     printf("%llu commands, %llu pages, %llu written by the guest while a command ran, %llu written by the backend of which %llu differ (%s), "
            "%llu of %llu frames match, %llu timeouts\n",
            (unsigned long long)st.commands, (unsigned long long)st.pages, (unsigned long long)st.guest_pages, (unsigned long long)st.written_pages,

@@ -30,6 +30,8 @@ static const nir_shader_compiler_options options = {
     .lower_extract_word = true,
     .lower_insert_byte = true,
     .lower_insert_word = true,
+    .lower_pack_32_2x16_split = true,
+    .lower_unpack_32_2x16_split = true,
     .lower_pack_half_2x16 = false,
     .lower_unpack_half_2x16 = false,
     .lower_pack_64_2x32_split = false,
@@ -112,6 +114,17 @@ static bool lower_rtne(nir_builder *b, nir_alu_instr *alu, void *data) {
     return true;
 }
 
+/* Adreno rejects narrow PhysicalStorageBuffer loads in these pipelines. Read
+   aligned words and let NIR unpack the original byte and halfword fields. */
+static nir_mem_access_size_align word_access(nir_intrinsic_op op, uint8_t bytes, uint8_t bits,
+        uint32_t mul, uint32_t offset, bool constant, enum gl_access_qualifier access, const void *data) {
+    (void)mul; (void)offset; (void)constant; (void)access; (void)data;
+    if (op == nir_intrinsic_load_global || op == nir_intrinsic_load_global_constant)
+        return (nir_mem_access_size_align){.num_components = (bytes + 3) / 4, .bit_size = 32, .align = 4,
+            .shift = nir_mem_access_shift_method_scalar};
+    return (nir_mem_access_size_align){.num_components = bytes / (bits / 8), .bit_size = bits, .align = bits / 8};
+}
+
 static int compile(const void *bitcode, size_t size, const char *entry, const AirSpirvOptions *opt, AirSpirv *out);
 
 int air_compile_spirv(const void *bitcode, size_t size, const char *entry, const AirSpirvOptions *opt, AirSpirv *out) {
@@ -140,7 +153,10 @@ static int compile(const void *bitcode, size_t size, const char *entry, const Ai
         const struct stela_metal_varying *v = &reflection.varyings[i];
         linked[i] = (struct stela_metal_linked_varying){reflection.names + v->identifier, v->identifier_bytes, v->per_primitive};
     }
-    struct stela_metal_specialization spec = {.varyings = linked, .varying_count = nv};
+    /* Bound samplers may use pixel coordinates. Stela normalizes those in the
+       shader when the runtime sampler flags are enabled for the slot. */
+    struct stela_metal_specialization spec = {.varyings = linked, .varying_count = nv,
+        .bicubic = STELA_METAL_BICUBIC_IDS | 0xffffu};
     /* Constexpr samplers: each state the module declares gets the backend's sampler for it. */
     static uint64_t states[STELA_METAL_SAMPLER_STATES];
     static struct stela_air_constexpr_sampler samplers[STELA_METAL_SAMPLER_STATES];
@@ -167,13 +183,16 @@ static int compile(const void *bitcode, size_t size, const char *entry, const Ai
     NIR_PASS(_, nir, nir_lower_alu_to_scalar, is_vector_reduction, NULL);
     NIR_PASS(_, nir, nir_lower_bit_size, widen_derivatives, NULL);
     NIR_PASS(_, nir, nir_lower_fp16_casts, nir_lower_fp16_rtz | nir_lower_fp16_ru | nir_lower_fp16_rd);
+    const nir_lower_mem_access_bit_sizes_options memory = {.callback = word_access, .modes = nir_var_mem_global};
+    NIR_PASS(_, nir, nir_lower_mem_access_bit_sizes, &memory);
+    NIR_PASS(_, nir, nir_lower_pack);
     ntv_shader_prepare(nir);
     if (print_nir) {
         printf("---- prepared for the emitter ----\n");
         nir_print_shader(nir, stdout);
     }
     const struct ntv_info info = {
-        .have_vulkan_memory_model = true,
+        .have_vulkan_memory_model = !opt->no_memory_model,
         .has_demote_to_helper = true,
         .is_native_vulkan = true,
         .have_shader_output_layer = true,

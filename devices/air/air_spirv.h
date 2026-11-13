@@ -27,6 +27,7 @@ typedef struct {
        answer it (the low half is its index in the sampler heap). */
     uint64_t (*constexpr_sampler)(void *ctx, uint64_t state);
     void *ctx;
+    int no_memory_model; /* the device has no vulkanMemoryModel (MoltenVK): GLSL450 memory model */
     int print_nir; /* dump the NIR to stdout */
 } AirSpirvOptions;
 
