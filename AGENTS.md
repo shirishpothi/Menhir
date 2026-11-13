@@ -86,3 +86,25 @@ that works and name it in your final report so the merge is easy.
 - Verify what you claim. Say what you ran and what it printed. If something is untested or
   does not work, say so plainly in your final report.
 - Write docs and comments in plain, direct English, in the style of the upstream docs.
+
+## App versioning and updates
+
+The tablet gets new builds through the in-app updater (`docs/android/app.md`, Updates), as
+the owner's app Slate does. These rules come from what Slate learned.
+
+- `versionName` and `versionCode` live in `android/app/build.gradle.kts`.
+- `versionName` is semver `MAJOR.MINOR.PATCH`, staying on `0.x`. MINOR only for a
+  substantial new capability (macOS first boots, graphics first appear, a new screen).
+  PATCH for everything else, including UI rework, tweaks and fixes. When in doubt, PATCH.
+- `versionCode` goes up by exactly 1 with every version bump and is never reused. The
+  updater only offers a build with a higher `versionCode` than the one installed, and
+  `scripts/publish-update.sh` tags the release `v<versionName>`, so a reused name or code
+  breaks publishing.
+- Bump once per batch of work that will be installed on the tablet, in the commit that
+  completes it; not per small commit. Read the current values just before you commit,
+  because another agent may have bumped them.
+- Only the orchestrator runs `scripts/publish-update.sh`. Never publish from unpushed or
+  uncommitted code. Never put a token in the build, the repository or the APK.
+- Use `adb install` only when the updater cannot deliver a build (for example one that
+  breaks the updater), and say why. Never uninstall the app or clear its data: the
+  installed Mac lives in its storage.
