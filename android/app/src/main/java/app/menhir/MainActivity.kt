@@ -102,6 +102,7 @@ class MainActivity : ComponentActivity() {
 }
 
 fun startSession(context: Context, mac: Mac) {
+    if (app.menhir.update.Updater.state.value is app.menhir.update.Updater.State.Installing) return
     context.startActivity(Intent(context, SessionActivity::class.java).putExtra(SessionActivity.MAC_ID, mac.id))
 }
 
@@ -110,6 +111,7 @@ private val SidePane = 360.dp
 
 @Composable
 private fun Home() {
+    app.menhir.update.WatchForUpdates()
     val context = LocalContext.current
     val macs by Machines.all.collectAsState()
     val install by Installer.status.collectAsState()
@@ -150,6 +152,7 @@ private fun Home() {
                         Text("Test build. The engine is simulated: nothing downloads and macOS does not run.", style = Caption)
                     }
                 }
+                app.menhir.update.UpdatePill()
                 if (macs.isNotEmpty()) {
                     Button(
                         onClick = newMac,
@@ -205,6 +208,7 @@ private fun Home() {
                             OutlinedButton(onClick = { Device.askBatteryExemption(context) }) { Text("Allow background use") }
                         }
                     }
+                    app.menhir.update.UpdateSettings()
                     Images()
                 }
             }
@@ -213,12 +217,12 @@ private fun Home() {
 
     if (creating) NewMacDialog(onDismiss = { creating = false }) { mac, release, keep ->
         creating = false
-        Installer.start(context, mac, release, keep)
+        if (app.menhir.update.Updater.state.value !is app.menhir.update.Updater.State.Installing) Installer.start(context, mac, release, keep)
     }
     installing?.let { mac ->
         ReleaseDialog(mac, onDismiss = { installing = null }) { release, keep ->
             installing = null
-            Installer.start(context, mac, release, keep)
+            if (app.menhir.update.Updater.state.value !is app.menhir.update.Updater.State.Installing) Installer.start(context, mac, release, keep)
         }
     }
     deleting?.let { mac ->

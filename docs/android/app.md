@@ -239,3 +239,41 @@ These need the real engine:
 - the clipboard helper and the shared folder with macOS.
 
 Needs the graphics backend: any picture at all.
+
+## Updates
+
+On the Macs screen, paste a fine-grained GitHub token into Update token and save it once.
+Limit it to `shirishpothi/Menhir` with read-only Contents. It stays in no-backup storage,
+never in the APK or repository. Replace it there when it expires. The screen shows the
+installed version and last check result. Checks run on arrival (at most every 30 seconds),
+every five minutes, and on a ping from Menhir's own ntfy topic. Repeat checks use ETags;
+failed checks retry after 15 seconds. Only higher version codes are offered.
+
+Tap the header pill to download. It fills with progress and waits while a Mac is active
+or macOS is installing. Android verifies the signing key and keeps app data. Outcomes,
+confirmation, reopening, superseded downloads and the two-minute retry fallback follow Slate;
+there is no document resume point, editor dot or compile profile.
+
+ColorOS needs all three settings to reopen: Display over other apps; App info → Battery
+usage → Allow background activity (Smart mode blocks reopening and replacement broadcasts);
+and Apps → Special app access → Display pop-ups while in background. The last setting is
+not on App info and cannot be read by apps; search Settings for “pop-ups” and enable it
+by hand. Otherwise open Menhir yourself. The installer activity reopens the app; a recent
+in-app update marker lets the replacement receiver act as backup, without reopening after adb installs.
+
+To publish, increment `versionCode` and choose an unused `versionName` in
+`android/app/build.gradle.kts`, then run from the repository root:
+
+```sh
+(cd android/app && ./gradlew assembleDebug lint testDebugUnitTest && ./gradlew --stop)
+git add android/app/build.gradle.kts
+git commit -m "Bump Android update version"
+git push origin main
+./scripts/publish-update.sh
+```
+
+The script refuses a dirty or unpushed checkout, publishes `menhir-<code>.apk` to the private
+repository, then pings ntfy. It uses the debug APK to match the build on the tablet today.
+Release builds also use `signingConfigs.getByName("debug")`; preserve the existing debug
+keystore and back it up privately. Never replace it or commit it. Publishing is a separate
+step; building does not contact GitHub or ntfy.
