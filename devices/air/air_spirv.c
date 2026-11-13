@@ -115,12 +115,13 @@ static bool lower_rtne(nir_builder *b, nir_alu_instr *alu, void *data) {
 }
 
 /* Adreno rejects narrow PhysicalStorageBuffer loads in these pipelines. Read
-   aligned words and let NIR unpack the original byte and halfword fields. */
+   words at their existing alignment and let NIR unpack the byte and halfword
+   fields. Forcing alignment introduces extra shifts that lose tint alpha on Adreno. */
 static nir_mem_access_size_align word_access(nir_intrinsic_op op, uint8_t bytes, uint8_t bits,
         uint32_t mul, uint32_t offset, bool constant, enum gl_access_qualifier access, const void *data) {
     (void)mul; (void)offset; (void)constant; (void)access; (void)data;
     if (op == nir_intrinsic_load_global || op == nir_intrinsic_load_global_constant)
-        return (nir_mem_access_size_align){.num_components = (bytes + 3) / 4, .bit_size = 32, .align = 4,
+        return (nir_mem_access_size_align){.num_components = (bytes + 3) / 4, .bit_size = 32, .align = 1,
             .shift = nir_mem_access_shift_method_scalar};
     return (nir_mem_access_size_align){.num_components = bytes / (bits / 8), .bit_size = bits, .align = bits / 8};
 }

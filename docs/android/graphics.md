@@ -2,7 +2,7 @@
 
 macOS draws through Apple's paravirtual GPU driver (`AppleParavirtGPU`). On iOS, Henge answers that driver with
 `devices/pvg_lite.c` and replays its work with Metal in `devices/pvg_metal.m`. Android has no Metal, so Menhir
-replays the same work with Vulkan, in `devices/pvg_vulkan.c`, and presents it to an `ANativeWindow`.
+replays the same work off-screen with Vulkan, in `devices/pvg_vulkan.c`. Window presentation is not implemented.
 
 This doc is the protocol as far as the backend needs it, the formats the guest sends, the shader route, what is
 covered, and how it is tested without the tablet. Section 7 says what is done and what is not; keep it true.
@@ -174,15 +174,14 @@ Cost for the app: LLVM's bitcode reader, IR, passes and support libraries for `a
 LLVM backends), plus Mesa's `src/util` and `src/compiler/nir`, plus Stela's compiler and the emitter. Estimate:
 25 to 35 MB of native code before stripping unused passes; to be measured (section 7).
 
-Compiling is slow (LLVM then NIR then the vendor's SPIR-V compiler), so SPIR-V is cached on disk by a hash of the
-library and the specialization (function constants, vertex layout, attachment formats), and pipelines through a
-`VkPipelineCache`.
+Compiling is slow (LLVM then NIR then the vendor's SPIR-V compiler). Pipelines are kept in memory for each object;
+a `VkPipelineCache` is used during the session. There is no persistent shader or pipeline cache yet.
 
 ## 4. The Vulkan backend
 
 `devices/pvg_vulkan.c` keeps `pvg_metal.m`'s structure: a worker thread takes commands in order, objects are made
-lazily per task and ref, and a command's stamp is completed when its GPU work is done (a timeline semaphore waited
-on by a completion thread). The interface is `pvg_lite.h`'s `hv_pvg_metal_*`; the engine links one backend, so the
+lazily per task and ref, and a command's stamp is completed after its GPU work finishes. The worker waits on a Vulkan fence after each
+exec; there is no overlap or separate completion thread yet. The interface is `pvg_lite.h`'s `hv_pvg_metal_*`; the engine links one backend, so the
 names stay until every backend has moved to the neutral ones (section 8).
 
 Memory: on Apple platforms Metal wraps guest pages without copying (`vm_remap` then `newBufferWithBytesNoCopy`). On
@@ -191,11 +190,9 @@ bit 0, op 0x34) or its pages' hash changed, and written back after an exec that 
 guest asks (op 0x35/0x3e). `VK_EXT_external_memory_host` over a memfd view of guest RAM would remove the copies, if
 the tablet's driver supports it (section 9).
 
-Presentation: the app hands over an `ANativeWindow *` where iOS hands a `CAMetalLayer *`: through the same call,
-`hv_vm_set_display_layer` (`henge_vm_set_display_surface` in the app's bridge), and `NULL` when Android destroys the
-surface (`surfaceDestroyed`, the app going to the background). The backend acquires the window, makes a
-`VkSurfaceKHR` and a swapchain, draws the shown surface into it with the pointer on top, and drops the swapchain and
-surface when the window goes. Guest drawing goes on without a window; the next window shows the newest frame.
+Presentation is outside this milestone. Swap commands select the display surface; the replay reads the surface
+back into guest memory and writes its composed image to a PNG. `hv_pvg_metal_set_layer` rejects a non-null layer.
+No app or engine build is wired to this backend, and it does not create an Android window or swapchain.
 
 ## 5. Testing without the tablet
 
@@ -238,28 +235,87 @@ Status: **done** works and is checked by a replay; **partial** works for the cas
 
 | Area | Metal backend | Vulkan backend |
 | --- | --- | --- |
-| Exec, object model, releases, task end | done | see section 7 |
-| Buffers, heaps, heap buffers | done | |
-| Textures: private, in task memory, views, over buffers, in heaps | done | |
-| Surfaces: single plane | done | |
-| Surfaces: multi-plane video (420v, x420, b3a8) | done | |
-| Render pass, attachments, load/store, resolve | done | |
-| Draws: plain, indexed, instanced, indirect | done | |
-| Tessellation draws | done | |
-| Tile shaders, imageblocks | done | |
-| Compute dispatch, threadgroup memory | done | |
-| Blits: copies, fill, mipmaps | done | |
-| Fences, barriers, useResource/useHeap | done | |
-| Queries 450..469 | done | |
-| Samplers, depth-stencil states | done | |
-| Render, tile, compute pipelines | done (Metal SPI) | |
-| Shaders | done (Metal) | |
-| Swap, display, pointer | done | |
-| Instant resume (`quiesce`, display state) | done | |
+| Exec, object model, releases, task end | done | partial: ordered worker, synchronous execs; no general validation of malformed streams |
+| Buffers, heaps, heap buffers | done | partial: copied host-visible buffers; no texture heap aliasing |
+| Textures: private, in task memory, views, over buffers, in heaps | done | partial: uncompressed uploads, views and buffer textures; heap textures use separate images |
+| Surfaces: single plane | done | partial: macOS 15 BGRA and RGhA |
+| Surfaces: multi-plane video (420v, x420, b3a8) | done | no |
+| Render pass, attachments, load/store, resolve | done | partial: dynamic rendering; tested single-sample color/stencil paths, resolves unverified |
+| Draws: plain, indexed, instanced, indirect | done | partial: decoder implemented, only the recording's draws checked |
+| Tessellation draws | done | no |
+| Tile shaders, imageblocks | done | no |
+| Compute dispatch, threadgroup memory | done | partial: direct dispatch; not exercised by the first-frame check |
+| Blits: copies, fill, mipmaps | done | partial: basic copies, aligned fill and mip generation; not all formats or subresources |
+| Fences, barriers, useResource/useHeap | done | partial: ordered passes and execs; residency and fence records are ignored |
+| Queries 450..469 | done | partial: basic limits, sizes, addresses and IDs; pipeline IDs do not support indirect execution |
+| Samplers, depth-stencil states | done | partial: state decoder, runtime pixel-coordinate samplers; per-binding LOD clamps ignored |
+| Render, tile, compute pipelines | done (Metal SPI) | partial: render and compute; no tile pipelines |
+| Shaders | done (Metal) | partial: recording's AIR through Stela and Mesa; runtime sampler flags enabled |
+| Swap, display, pointer | done | partial: off-screen display surface readback; no window or pointer overlay |
+| Instant resume (`quiesce`, display state) | done | no: display metadata only; private GPU resources are not saved |
+
+Unsupported or incomplete command paths include tessellation render tags 12–15 and 18–19; tile tags 155, 157,
+161, 162 and 164; indirect compute tag 201; depth-clip and fill state 109/124; and per-binding sampler LOD clamps
+113/128. Tag 154's vertex amplification mapping is ignored. Synchronize/invalidate ops 0x34/0x35/0x3e rely on
+exec-end copies, which do not implement general guest-backed texture writeback. Compressed texture uploads,
+framebuffer fetch, advanced queries and macOS 14's compact surface descriptors remain incomplete. Anything not
+exercised by the recording is unverified even where the decoder has a case for it.
 
 ## 7. Status
 
-Filled in as work lands; see the final report of each change for what was run.
+The inherited capture rig, descriptor parser and AIR compiler are committed. The off-screen Vulkan backend and
+Android static library now build independently of the app and engine. This milestone uses the existing
+`~/.menhir/captures/setup-0.pvgcap` (796 MiB, Setup Assistant's Language screen); no new recording was made.
+The recording is version 1 and does not identify the CPU count. Replay uses the existing page-writer heuristic:
+a page the backend did not change may be treated as a guest write. Thus free-running replay is useful image
+regression evidence, but not proof that every GPU-written page was attributed correctly.
+
+First-frame invocation (17 commands, 1920×1080 RGhA; default tolerance 2/255, at least 99.9% of pixels):
+
+```sh
+make -f android/gfx/replay/Makefile vulkan
+android/gfx/build/mac/pvg_replay_vulkan --free --frames 1 --out /tmp/menhir-gfx-final-mac \
+  ~/.menhir/captures/setup-0.pvgcap
+```
+
+`--frames N` stops after N swaps; without it the whole recording is replayed. Output is line buffered, and cold
+shader compilation may take up to 120 seconds before a command is considered timed out.
+
+The Metal baseline (`pvg_replay_metal --free`) matches all 12 recorded frames exactly. The Mac Vulkan first frame
+passes: 0.0096% of pixels differ by more than 2, worst channel difference 236, PSNR 43.9 dB, zero timeouts. This is
+a tolerance match, not byte equality; small corner-edge differences remain. PNGs include the recorded frame,
+replayed frame and a thresholded red mask.
+Only the first frame is accepted for this milestone; broader replay coverage remains future work.
+
+For Android, first build the pinned dependencies with `android/gfx/mesa/build.sh android` and
+`android/gfx/llvm/build.sh`, then:
+
+```sh
+SDK=/opt/homebrew/share/android-commandlinetools
+$SDK/cmake/3.31.6/bin/cmake -S android/gfx -B android/gfx/build/android -G Ninja \
+  -DCMAKE_MAKE_PROGRAM=$SDK/cmake/3.31.6/bin/ninja \
+  -DCMAKE_TOOLCHAIN_FILE=$SDK/ndk/29.0.14206865/build/cmake/android.toolchain.cmake \
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-34 -DCMAKE_BUILD_TYPE=Release
+$SDK/cmake/3.31.6/bin/cmake --build android/gfx/build/android -j4
+```
+
+This builds `libmenhir_gfx.a` and `pvg_replay_vulkan`. The CMake target carries the static Mesa and LLVM dependency
+archives through its link interface. Strip the replay binary with the NDK's `llvm-strip` before copying it.
+Run `adb devices` to select the tablet's current serial, then pass `adb -s "$SERIAL"` for every device operation.
+Use only `/data/local/tmp/menhir-gfx/` for the binary, recording and PNGs. The separate installation under
+`/data/local/tmp/menhir/` is unrelated and must be left alone.
+
+The tablet first frame also passes: 0.0096% of pixels differ by more than 2, worst difference 236, PSNR 43.9 dB,
+zero timeouts. Both hosts use the Vulkan memory model. The Adreno 750 reports Vulkan 1.3.128.
+`make B=build-gfx` and `make B=build-gfx test` pass on the Mac. No app, engine build wiring or files outside
+the graphics ownership paths were changed. The tablet replay files are removed after PNGs are pulled to the Mac.
+
+The compiler uses word-sized physical buffer loads on Adreno; narrow loads caused pipeline rejection (-13).
+The lowering and emitter preserve the original access alignment: forcing word alignment produced a separate
+last-halfword access that read the globe tint alpha as zero on Adreno. Preserving alignment restores alpha to one.
+Runtime sampler flags are needed to normalize Metal's pixel coordinates before Vulkan sampling. Without those
+flags the Language screen loses text and its rounded window edges. SPIR-V can be dumped with
+`HV_PVG_SPIRV_DIR=DIR` (create DIR first) for validation and driver diagnosis.
 
 ## 8. Interface changes
 

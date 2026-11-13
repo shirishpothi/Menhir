@@ -2692,7 +2692,8 @@ emit_load_global(struct ntv_context *ctx, nir_intrinsic_instr *intr)
    if (nir_intrinsic_access(intr) & ACCESS_ATOMIC)
       result = emit_atomic(ctx, SpvOpAtomicLoad, dest_type, ptr, 0, 0);
    else
-      result = spirv_builder_emit_load_aligned(&ctx->builder, dest_type, ptr, intr->def.bit_size / 8, coherent);
+      /* Menhir: packed halfword fields can require less than word alignment. */
+      result = spirv_builder_emit_load_aligned(&ctx->builder, dest_type, ptr, nir_intrinsic_align(intr), coherent);
    store_def(ctx, intr->def.index, result, nir_type_uint);
 }
 

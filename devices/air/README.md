@@ -22,6 +22,8 @@ Changes to `ntv/`, each marked in the source:
   device addresses in all stages, not only compute.
 - Runtime (unsized) arrays of images and textures, as samplers already had: Stela's descriptor heaps.
 - Array derefs of push constant variables, and separate textures typed as `emit_image` types them.
+- Physical buffer loads retain NIR's proven alignment, including packed halfword fields. Forcing word alignment
+  made the Adreno replay read vertex tint alpha incorrectly.
 
 The compiler needs Mesa's NIR at the same commit with four patches (`android/gfx/mesa/patches`: three generic NIR
 changes from Stela's series, and a build change so NIR builds without a driver), built by
