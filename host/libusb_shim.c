@@ -38,7 +38,15 @@ void hv_libusb_shim_attach(HvVirtioUsb *d) {
 
 /* ---- the device ---- */
 
+struct libusb_context {
+    struct libusb_device *view;
+    int pipefd[2];
+};
+static struct libusb_context g_default_context;
+static libusb_context *context_of(libusb_context *ctx) { return ctx ? ctx : &g_default_context; }
+
 struct libusb_device {
+    libusb_context *ctx;
     int refs;
     uint32_t session;           /* the connection it stands for */
     uint8_t address;
@@ -72,6 +80,46 @@ static void dev_unref(struct libusb_device *d) {
     free(d);
 }
 
+/* A device belongs to the context that discovered it. Keep descriptor views
+   separate so an event loop cannot dispatch another library's transfers. */
+static struct libusb_device *device_view(struct libusb_device *d, libusb_context *ctx) {
+    ctx = context_of(ctx);
+    pthread_mutex_lock(&g_mu);
+    struct libusb_device *old = ctx->view;
+    if (old && old->session == d->session) {
+        old->refs++;
+        pthread_mutex_unlock(&g_mu);
+        return old;
+    }
+    struct libusb_device *v = calloc(1, sizeof *v);
+    if (v) {
+        *v = *d;
+        v->ctx = ctx;
+        v->refs = 2; /* the context and the caller */
+        memset(v->configs, 0, sizeof v->configs);
+        for (int i = 0; i < 8; i++) if (d->configs[i]) {
+            v->configs[i] = malloc(d->config_len[i]);
+            if (!v->configs[i]) {
+                for (int j = 0; j < i; j++) free(v->configs[j]);
+                free(v); v = NULL; break;
+            }
+            memcpy(v->configs[i], d->configs[i], d->config_len[i]);
+        }
+    }
+    if (v) {
+        if (old) old->gone = 1;
+        ctx->view = v;
+    }
+    pthread_mutex_unlock(&g_mu);
+    if (v) dev_unref(old);
+    return v;
+}
+
+static int device_gone(struct libusb_device *d) {
+    uint32_t session;
+    return d->gone || !hv_vusb_online(g_usb, &session) || session != d->session;
+}
+
 /* Read the descriptors of a fresh connection. */
 static struct libusb_device *enumerate(uint32_t session) {
     if (hv_usb_reset(g_usb, 2000) != 0) return NULL;
@@ -103,6 +151,7 @@ fail:
 
 typedef struct Hotplug {
     int handle, events;
+    libusb_context *ctx;
     libusb_hotplug_callback_fn cb;
     void *user;
     struct Hotplug *next;
@@ -118,7 +167,13 @@ static void fire(struct libusb_device *d, int event) {
     for (Hotplug *h = g_hotplug; h && n < 16; h = h->next)
         if (h->events & event) list[n++] = h;
     pthread_mutex_unlock(&g_mu);
-    for (int i = 0; i < n; i++) list[i]->cb(NULL, d, (libusb_hotplug_event)event, list[i]->user);
+    for (int i = 0; i < n; i++) {
+        struct libusb_device *v = device_view(d, list[i]->ctx);
+        if (!v) continue;
+        v->gone = d->gone;
+        list[i]->cb(list[i]->ctx, v, (libusb_hotplug_event)event, list[i]->user);
+        dev_unref(v);
+    }
 }
 
 /* Bring g_dev up to date with the guest: called from the device list and the
@@ -180,7 +235,13 @@ static pthread_once_t g_workers_once = PTHREAD_ONCE_INIT;
 
 static pthread_mutex_t g_done_mu = PTHREAD_MUTEX_INITIALIZER;
 static Xfer *g_done_head, *g_done_tail;
-static int g_pipe[2] = {-1, -1};
+static void context_pipe_init(libusb_context *ctx) {
+    ctx->pipefd[0] = ctx->pipefd[1] = -1;
+    if (pipe(ctx->pipefd) == 0) {
+        fcntl(ctx->pipefd[0], F_SETFL, O_NONBLOCK);
+        fcntl(ctx->pipefd[1], F_SETFL, O_NONBLOCK);
+    }
+}
 
 static Xfer *g_active[32]; /* the transfer each worker is running, for cancel */
 
@@ -195,6 +256,8 @@ static void complete(Xfer *x, enum libusb_transfer_status st, int actual) {
         sync_cb(x->t);
         return;
     }
+    /* The event loop may free x as soon as it is queued. */
+    int wakefd = context_of(x->t->dev_handle->dev->ctx)->pipefd[1];
     pthread_mutex_lock(&g_done_mu);
     x->next = NULL;
     if (g_done_tail) g_done_tail->next = x;
@@ -202,7 +265,7 @@ static void complete(Xfer *x, enum libusb_transfer_status st, int actual) {
     g_done_tail = x;
     pthread_mutex_unlock(&g_done_mu);
     char c = 1;
-    (void)!write(g_pipe[1], &c, 1);
+    (void)!write(wakefd, &c, 1);
 }
 
 /* Run one transfer synchronously, in slices so a cancel is noticed. */
@@ -210,7 +273,7 @@ static void run(Xfer *x) {
     struct libusb_transfer *t = x->t;
     struct libusb_device *d = t->dev_handle->dev;
     int slice = 200, waited = 0, limit = t->timeout ? (int)t->timeout : 0;
-    if (d->gone) {
+    if (device_gone(d)) {
         complete(x, LIBUSB_TRANSFER_NO_DEVICE, 0);
         return;
     }
@@ -341,10 +404,7 @@ static void *worker_main(void *arg) {
 }
 
 static void workers_init(void) {
-    if (pipe(g_pipe) == 0) {
-        fcntl(g_pipe[0], F_SETFL, O_NONBLOCK);
-        fcntl(g_pipe[1], F_SETFL, O_NONBLOCK);
-    }
+    context_pipe_init(&g_default_context);
     for (int i = 0; i < 32; i++) {
         Worker *w = &g_workers[i];
         w->ep = i;
@@ -380,7 +440,7 @@ void libusb_free_transfer(struct libusb_transfer *t) {
 
 int libusb_submit_transfer(struct libusb_transfer *t) {
     pthread_once(&g_workers_once, workers_init);
-    if (!t->dev_handle || t->dev_handle->dev->gone) return LIBUSB_ERROR_NO_DEVICE;
+    if (!t->dev_handle || device_gone(t->dev_handle->dev)) return LIBUSB_ERROR_NO_DEVICE;
     Xfer *x = xfer_of(t);
     x->cancel = 0;
     x->next = NULL;
@@ -400,16 +460,19 @@ int libusb_cancel_transfer(struct libusb_transfer *t) {
     return 0;
 }
 
-static void drain_completions(void) {
+static void drain_completions(libusb_context *ctx) {
+    ctx = context_of(ctx);
     char buf[64];
-    while (read(g_pipe[0], buf, sizeof buf) > 0) {
+    while (read(ctx->pipefd[0], buf, sizeof buf) > 0) {
     }
     for (;;) {
         pthread_mutex_lock(&g_done_mu);
-        Xfer *x = g_done_head;
+        Xfer *prev = NULL, *x = g_done_head;
+        while (x && x->t->dev_handle->dev->ctx != ctx) { prev = x; x = x->next; }
         if (x) {
-            g_done_head = x->next;
-            if (!g_done_head) g_done_tail = NULL;
+            if (prev) prev->next = x->next;
+            else g_done_head = x->next;
+            if (g_done_tail == x) g_done_tail = prev;
         }
         pthread_mutex_unlock(&g_done_mu);
         if (!x) break;
@@ -421,22 +484,22 @@ static void drain_completions(void) {
 }
 
 int libusb_handle_events_timeout_completed(libusb_context *ctx, struct timeval *tv, int *completed) {
-    (void)ctx;
+    ctx = context_of(ctx);
     pthread_once(&g_workers_once, workers_init);
     pthread_mutex_lock(&g_cb_mu);
     refresh();
-    drain_completions();
+    drain_completions(ctx);
     pthread_mutex_unlock(&g_cb_mu);
     if (completed && *completed) return 0;
     long us = tv ? tv->tv_sec * 1000000L + tv->tv_usec : 100000;
     if (us > 0) {
         fd_set fds;
         FD_ZERO(&fds);
-        FD_SET(g_pipe[0], &fds);
+        FD_SET(ctx->pipefd[0], &fds);
         struct timeval w = {us / 1000000, (int)(us % 1000000)};
-        select(g_pipe[0] + 1, &fds, NULL, NULL, &w);
+        select(ctx->pipefd[0] + 1, &fds, NULL, NULL, &w);
         pthread_mutex_lock(&g_cb_mu);
-        drain_completions();
+        drain_completions(ctx);
         pthread_mutex_unlock(&g_cb_mu);
     }
     return 0;
@@ -454,14 +517,13 @@ int libusb_handle_events_completed(libusb_context *ctx, int *completed) {
 int libusb_handle_events(libusb_context *ctx) { return libusb_handle_events_completed(ctx, NULL); }
 
 const struct libusb_pollfd **libusb_get_pollfds(libusb_context *ctx) {
-    (void)ctx;
     pthread_once(&g_workers_once, workers_init);
     struct {
         const struct libusb_pollfd *list[2];
         struct libusb_pollfd fd;
     } *p = calloc(1, sizeof *p);
     if (!p) return NULL;
-    p->fd.fd = g_pipe[0];
+    p->fd.fd = context_of(ctx)->pipefd[0];
     p->fd.events = POLLIN;
     p->list[0] = &p->fd;
     return (const struct libusb_pollfd **)p;
@@ -555,7 +617,11 @@ int libusb_interrupt_transfer(libusb_device_handle *h, unsigned char ep, unsigne
 /* ---- context, devices, descriptors ---- */
 
 int libusb_init(libusb_context **ctx) {
-    if (ctx) *ctx = (libusb_context *)&g_usb;
+    if (ctx) {
+        *ctx = calloc(1, sizeof **ctx);
+        if (!*ctx) return LIBUSB_ERROR_NO_MEM;
+        context_pipe_init(*ctx);
+    }
     pthread_once(&g_workers_once, workers_init);
     return 0;
 }
@@ -565,7 +631,12 @@ int libusb_init_context(libusb_context **ctx, const struct libusb_init_option *o
     return libusb_init(ctx);
 }
 
-void libusb_exit(libusb_context *ctx) { (void)ctx; }
+void libusb_exit(libusb_context *ctx) {
+    if (!ctx) return;
+    dev_unref(ctx->view);
+    close(ctx->pipefd[0]); close(ctx->pipefd[1]);
+    free(ctx);
+}
 void libusb_set_debug(libusb_context *ctx, int level) { (void)ctx, (void)level; }
 int libusb_set_option(libusb_context *ctx, enum libusb_option o, ...) {
     (void)ctx, (void)o;
@@ -605,11 +676,14 @@ ssize_t libusb_get_device_list(libusb_context *ctx, libusb_device ***list) {
     if (!l) return LIBUSB_ERROR_NO_MEM;
     pthread_mutex_lock(&g_mu);
     ssize_t n = 0;
-    if (g_dev) {
-        g_dev->refs++;
-        l[n++] = g_dev;
-    }
+    struct libusb_device *d = g_dev;
+    if (d) d->refs++;
     pthread_mutex_unlock(&g_mu);
+    if (d) {
+        struct libusb_device *v = device_view(d, ctx);
+        if (v) l[n++] = v;
+        dev_unref(d);
+    }
     *list = l;
     return n;
 }
@@ -727,7 +801,7 @@ void libusb_free_config_descriptor(struct libusb_config_descriptor *c) {
 }
 
 int libusb_open(libusb_device *d, libusb_device_handle **h) {
-    if (d->gone) return LIBUSB_ERROR_NO_DEVICE;
+    if (device_gone(d)) return LIBUSB_ERROR_NO_DEVICE;
     libusb_device_handle *x = calloc(1, sizeof *x);
     if (!x) return LIBUSB_ERROR_NO_MEM;
     x->dev = libusb_ref_device(d);
@@ -798,6 +872,7 @@ int libusb_hotplug_register_callback(libusb_context *ctx, int events, int flags,
     Hotplug *h = calloc(1, sizeof *h);
     if (!h) return LIBUSB_ERROR_NO_MEM;
     h->events = events;
+    h->ctx = context_of(ctx);
     h->cb = cb;
     h->user = user;
     pthread_mutex_lock(&g_mu);
@@ -808,8 +883,10 @@ int libusb_hotplug_register_callback(libusb_context *ctx, int events, int flags,
     if (now) now->refs++;
     pthread_mutex_unlock(&g_mu);
     if (handle) *handle = h->handle;
-    if ((flags & LIBUSB_HOTPLUG_ENUMERATE) && now && (events & LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED))
-        cb(ctx, now, LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED, user);
+    if ((flags & LIBUSB_HOTPLUG_ENUMERATE) && now && (events & LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED)) {
+        struct libusb_device *v = device_view(now, ctx);
+        if (v) { cb(ctx, v, LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED, user); dev_unref(v); }
+    }
     if (now) dev_unref(now);
     return 0;
 }

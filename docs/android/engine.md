@@ -294,3 +294,31 @@ on the retained partial disk failed early with restore error 47: `newfs_apfs`
 reported an already synthesized APFS device, `Resource busy`. The partial disk
 was preserved. Further retries use separate blank sparse storage under the
 same tablet work directory and reuse the retained IPSW.
+
+The shim also violated libusb context ownership: `libusb_init` returned the
+same context for every library, and every event loop drained one completion
+queue. Libirecovery polls its hotplug context on another thread while usbmuxd
+polls the default context. That thread could run usbmuxd's receive callback
+concurrently with its client processing. Both paths call `send_packet` and
+modify mux sequence numbers and connection state, assuming one event thread.
+This supplies a concrete race capable of the sequence rejection above.
+
+The fix gives each context a device view and wake pipe, and dispatches transfer
+completions only in the owning context. Session checks reject stale views after
+reconnection. It leaves the vendored restore sources unchanged. The deterministic
+`test_usb_context` queues a completion for each of two contexts: before the fix,
+the foreign event loop dispatched both (2 callbacks, expected 1); after the fix,
+it dispatches one and leaves the default context's wake descriptor readable.
+The Android runner includes this test. To run it natively on the Mac:
+
+```
+clang -O2 -Icore -Ihost -Idevices -Ithird_party \
+  android/engine/test-usb-context.c -o build-engine/test_usb_context
+build-engine/test_usb_context
+```
+
+Mac `make B=build-engine test` and the full tablet runner passed with the fix.
+The context violation is reproduced and fixed; whether it explains the full
+Cryptex stall still requires the confirming restore. The unfixed blank-disk
+baseline was stopped after 394.410 seconds during main-image upload. A first
+fixed startup smoke run was stopped after 56.830 seconds for final review.

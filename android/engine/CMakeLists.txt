@@ -67,3 +67,8 @@ endif()
 add_executable(test_platform test-platform.c)
 target_link_libraries(test_platform PRIVATE menhir-engine)
 add_test(NAME platform COMMAND test_platform)
+
+add_executable(test_usb_context test-usb-context.c)
+target_include_directories(test_usb_context PRIVATE ${ROOT}/core ${ROOT}/host ${ROOT}/devices ${ROOT}/third_party)
+target_compile_options(test_usb_context PRIVATE -UNDEBUG)
+add_test(NAME usb_context COMMAND test_usb_context)
