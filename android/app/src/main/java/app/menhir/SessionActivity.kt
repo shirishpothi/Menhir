@@ -128,7 +128,6 @@ class SessionActivity : ComponentActivity() {
         mac = found
         mode = displayMode()
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        immersive()
 
         sticky.onChange = { stickyDown = sticky.down.toSet() }
         surface = MacSurface(this, buttons, onReveal = { controls = true }, afterInput = { sticky.releaseAll() })
@@ -146,6 +145,7 @@ class SessionActivity : ComponentActivity() {
             addView(surface, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
             addView(overlay, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
         })
+        immersive()
         surface.requestFocus()
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
