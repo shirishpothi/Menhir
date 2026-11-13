@@ -1,99 +1,109 @@
-<p align="center">
-  <img src="docs/icon.png" width="120" height="120" alt="Henge">
-</p>
+# Menhir
 
-<h1 align="center">Henge</h1>
+An unfinished attempt to run macOS on an Android tablet, built as a port of
+[Henge](https://github.com/Leviidev/Henge), which runs macOS on iPhone and iPad.
 
-<p align="center">macOS on your iPhone and iPad.</p>
+**This project is abandoned.** It never booted macOS on Android, and nothing here is usable as
+an app. The code is published as-is in case it helps someone continue the work. There are no
+releases meant for use, no support, and no plans to continue.
 
-<p align="center">
-  <a href="#install">Install</a>
-  ·
-  <a href="docs/architecture.md">How it works</a>
-  ·
-  <a href="https://itslevii.dev">Website</a>
-  ·
-  <a href="https://github.com/Leviidev/Henge/releases">Releases</a>
-</p>
+The only device it ran on was an OPPO Pad with an Adreno 750 GPU.
 
-<p align="center">
-  <a href="https://github.com/Leviidev/Henge/releases"><img src="https://img.shields.io/github/downloads/Leviidev/Henge/total?style=flat-square&color=2E6BFF&labelColor=111111" alt="Downloads"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/github/license/Leviidev/Henge?style=flat-square&color=2E6BFF&labelColor=111111" alt="GPL-2.0-or-later"></a>
-</p>
+## Where it got to
 
-Download macOS, install it on the device, and use it.
+As of 2026-11-14. "Verified" means it was run and seen working; everything else was only built.
 
-- **Own emulator** — iOS gives apps no hypervisor, so Henge runs the Mac's arm64 code through its own JIT, with its own MMU and devices. It doesn't use QEMU or Virtualization.framework.
-- **Installs on the device** — Henge downloads Apple's restore image and restores it the way a Mac does. No Mac needed, and nothing is decrypted or patched.
-- **Graphics** — macOS draws through a virtual GPU, and Henge replays its commands with Metal. Safari and Electron apps like Discord draw on it.
-- **Touch** — The screen is a Magic Trackpad 2: two fingers to scroll, and the Mac's own gestures work on it — three-finger swipes for Spaces and Mission Control and more. The volume buttons are its buttons: up clicks, down right-clicks, hold to drag. Esc, Tab, Control, Option and Command sit above the keyboard.
-- **Keyboard and mouse** — On iPad, a Magic Keyboard or a Bluetooth keyboard and mouse drive the Mac directly.
-- **External display** — During a Mac session, connect a display with a video-capable USB-C cable or a USB-C/HDMI dock. The mode activates automatically: the monitor shows the Mac, while the iPhone or iPad keeps its trackpad and keyboard controls. Disconnect to return the image to the device. The existing guest resolution is preserved. On iOS 17–26 the same happens through an older iOS route, not yet tried on hardware; outside a Mac session the display mirrors the device. USB-C video is user-confirmed on an iPhone 17 Pro running iOS 27 (development build 0.1/2).
-- **Sharing** — Copy and paste between macOS and the device, and a shared folder that shows up in Files and on the Mac.
-- **Fits the screen** — On iPad, a new Mac gets a screen the shape of the iPad's, so there are no black bars.
+### Verified
 
-On an iPhone 17 Pro, macOS reaches the lock screen in about 15 seconds. Discord installs, opens in about 15 seconds, logs in and sends messages.
+- **The engine runs on Android.** Henge's own arm64 JIT, MMU and device models (no QEMU, no
+  hypervisor) build with the NDK and run on the tablet as a command-line program, `hengevm`.
+  The engine's tests pass on the tablet.
+- **A full macOS install completed on the tablet.** On 2026-11-14 a command-line run restored
+  macOS Sequoia 15.6.1 onto a blank 48 GB disk image in about 18 minutes, ending with
+  `Restore Finished`. It used Apple's restore image, downloaded on the tablet, and Apple's
+  signing server, over the emulated Mac's virtual USB port. Nothing was decrypted or patched.
+- **The install stall was fixed.** Earlier installs always stopped at 71% of the 5.2 GB system
+  image. The cause was a race in the virtual libusb shim: two event loops shared one completion
+  queue, so USB mux packets reached the guest out of order and it stopped acknowledging data.
+  Commits `72c7ce0` and `22585b3` fix it, and the completed install ran with that fix.
+- **Graphics replay on the tablet's GPU.** A Vulkan backend replays a recording of macOS's
+  virtual GPU commands (Setup Assistant's first screen). The first frame matches Apple's Metal
+  output within tolerance (PSNR 43.9 dB) on both the Mac and the tablet, and an earlier
+  version drew it in a real window on the tablet.
+- **Host services**, on an Android emulator: networking (libslirp), TLS to Apple's signing
+  host, resumable downloads from Apple's CDN, audio output (AAudio) and boot-ROM extraction.
+- **The app shell.** A Kotlin app (`android/app`) builds, passes lint and its unit tests,
+  installs on the tablet, and shows its home screen. It has an in-app updater that installs new
+  builds from GitHub Releases.
 
-## Install
+### Not done or never tested
 
-Sideload `Henge.ipa` from [Releases](https://github.com/Leviidev/Henge/releases) with SideStore or AltStore, or install `Henge.tipa` with TrollStore or TrollStore Lite. To get updates in SideStore or AltStore, add Henge's source, `https://raw.githubusercontent.com/Leviidev/Henge/main/repo.json`, or `https://itslevii.dev/repo.json` for all of Leviidev's apps. iOS or iPadOS 17 or later, on an A14 or M1 chip or newer. So far it's tested only on an iPhone 17 Pro: iPad support is new and hasn't run on a real iPad yet.
+- **macOS has never booted on Android.** The completed install was never started. Whether the
+  installed disk boots, reaches the login screen, or runs anything is unknown.
+- **The app has never run the real engine.** The app's real-engine build compiles and links,
+  but every run of the app with a working Mac session used the fake engine (a simulated Mac
+  that draws a test pattern). The successful install was done from the command line, not from
+  the app, and the app cannot see that disk.
+- **No live picture.** The Vulkan backend has only replayed a recording. It has never drawn a
+  running macOS, and the app's session screen has never shown macOS output.
+- **Input is untested** against a real guest. Touch-as-trackpad, keyboard, mouse and the
+  volume-key buttons were only partly checked against the fake engine.
+- **Untested on Android:** snapshots and instant resume on 4 KB pages, pausing with a GPU, the
+  clipboard helper, the shared folder, guest networking end to end, and audio from a guest.
+- **Performance is poor and largely unmeasured.** The install ran on one emulated CPU and made
+  the tablet lag badly. It used up to about 3.2 GB of RAM, and starting a second engine from
+  the app at the same time pushed the tablet into memory thrashing.
 
-- **JIT** is required: StikDebug, TrollStore (which stops at iOS 17.0), TrollStore Lite (which needs a jailbreak), a jailbreak on its own, or the StikJIT helper built into Henge (iOS 26 or later).
-- **Storage:** about 43 GB free for macOS Sequoia. That's 17 GB for the download, which you can delete afterwards, and 26 GB for the Mac.
-- **Memory:** a Mac gets 4, 6 or 8 GB. Sign Henge with the increased memory limit entitlement if your certificate has it.
+## What would be needed to continue
 
-Then open the Install tab, pick macOS Sequoia 15.6.1, and keep Henge open with the device plugged in. Tahoe 26.6.2 and macOS 27.2 are offered too: both install and run on an iPhone 17 Pro, though Tahoe's first setup is slow and macOS 27 is the slowest (Safari's pages may stay blank on it). Sonoma 14.6.1 and Ventura 13.6 are smaller downloads (14.1 and 12.3 GB) for devices short on storage: they install, set up, and run Safari (both tested on an iPhone 17 Pro). Monterey isn't offered yet: it installs, but its desktop never appears.
+1. Boot the installed disk from the command line (`hengevm` without `--install`, with the same
+   ECID, disk and aux file) and capture the serial log. This is the next real unknown.
+2. If it boots, connect the Vulkan backend's window output to a live run, then to the app's
+   session screen.
+3. Let the app import a disk installed from the command line, or run an install end to end
+   from the app.
+4. Test input, multiple CPUs and memory use on the tablet, then snapshots and sharing.
+5. Expect a lot of performance work: Henge's engine was tuned for Apple silicon and iOS.
 
-## Sharing with the Mac
+## Layout
 
-Do this once for each Mac: open Terminal on the Mac, then in Henge open Details and tap **Type the Set Up Command**. Press Return on the Mac, and choose Allow when macOS asks about `henge-agent` and local networks. It needs the Mac's keyboard layout to be U.S.
+The Android work sits beside Henge's original code:
 
-Then a Henge folder in the Mac's home folder is the same folder as Files › Henge › Shared. What you copy on the Mac is copied on the device too, and the paste button pastes from the device into the Mac.
+| Path | What it is |
+| --- | --- |
+| `android/engine/` | NDK build of the engine and the `hengevm` CLI, with device tests |
+| `android/deps/` | NDK builds of the restore stack, libslirp, TLS, HTTP and audio |
+| `android/gfx/` | Vulkan backend for macOS's virtual GPU, shader compiler, replay tools |
+| `android/app/`, `android/native/` | Kotlin app and its JNI layer, with a fake engine for UI work |
+| `docs/android/` | Detailed notes: [engine](docs/android/engine.md), [graphics](docs/android/graphics.md), [services](docs/android/services.md), [app](docs/android/app.md) |
 
-## Known limits
-
-- Signing in to an Apple Account inside macOS fails with a verification error.
-- Graphics are tested on macOS's own apps, Chrome, Firefox, VS Code and Discord. Other apps may draw wrongly.
-- On macOS Sonoma, switching to a dynamic wallpaper (such as Sonoma) can stop the screen updating; opening any app brings it back. On Ventura, the Calendar icon in the Dock is missing its date.
-- For the first few minutes after you log in, macOS is busy starting up in the background, so apps open more slowly.
-- Only one Mac can start per launch. Quit Henge and open it again to start another, and to start one again after restarting or shutting down macOS.
-- iPadOS keeps some keyboard shortcuts for itself, such as Command-Tab.
-- It's emulation, so it runs slower than a real Mac.
-
-## Screenshots
-
-<table>
-  <tr>
-    <td align="center" colspan="3"><img src="Screenshots/ipad.jpg" alt="Discord on an iPad"><br><sub>iPad</sub></td>
-  </tr>
-  <tr>
-    <td align="center" width="33%"><img src="Screenshots/macs.png" alt="Macs"><br><sub>Macs</sub></td>
-    <td align="center" width="33%"><img src="Screenshots/trackpad.png" alt="Trackpad"><br><sub>Trackpad</sub></td>
-    <td align="center" width="33%"><img src="Screenshots/install.png" alt="Install macOS"><br><sub>Install macOS</sub></td>
-  </tr>
-</table>
-
-<sub>Captured on a Mac: the app's own screens with sample data, at iPad and iPhone sizes, showing a frame from Henge's renderer.</sub>
+The rest of the tree (`core/`, `devices/`, `host/`, `ios/`, `third_party/`) comes from Henge,
+with small changes for the port. See [docs/architecture.md](docs/architecture.md) for how the
+emulator works.
 
 ## Building
 
-To use Henge, install the [latest release](https://github.com/Leviidev/Henge/releases). Every change lands on `main` as it's made, so `main` can be unfinished between releases.
+On a Mac with the Android SDK at `/opt/homebrew/share/android-commandlinetools`, NDK 29 and
+CMake 3.31:
 
-On a Mac with Xcode 27 or later and `xcodegen`. Henge takes StikJIT, on-device pairing, libslirp and glib from a built [Husk](https://github.com/Leviidev/Husk) checkout at `~/Documents/Coding/Husk` (set `HUSK` to use another path):
-
-```bash
-ios/scripts/fetch_deps.sh
-tools/build_ios_restore.sh
-make ios-lib
-ios/scripts/package_ipa.sh
+```sh
+android/deps/fetch-sources.sh
+android/engine/build.sh                            # hengevm for the tablet
+cd android/app
+./gradlew assembleDebug                            # app with the fake engine
+./gradlew -PmenhirFakeEngine=false assembleDebug   # app with the real engine (never run)
 ```
 
-That produces `~/Desktop/Henge.ipa`, and `package_ipa.sh --trollstore` writes `Henge.tipa`.
+The real-engine and graphics builds also need the Mesa and LLVM builds described in
+[docs/android/graphics.md](docs/android/graphics.md). The command-line install procedure is in
+[docs/android/engine.md](docs/android/engine.md).
 
-`make` builds the engine for the Mac, `build/hengevm`, and `make test` runs its tests.
+## Credit and licence
 
-## Licence
+Almost all of the emulator is [Henge](https://github.com/Leviidev/Henge) by Leviidev; Menhir
+adds the Android port. Most of the Android code was written by AI coding agents (Claude and
+Codex) under one person's direction.
 
-GPL-2.0-or-later. Henge compiles in usbmuxd (GPLv2 or GPLv3) and code from Husk (GPL-2.0-or-later), so the shipped binary is a combined GPL work. It cannot go on the App Store. See [docs/licensing.md](docs/licensing.md).
-
-macOS and the Mac's boot ROM are Apple's and aren't part of Henge. Henge downloads both from Apple when you install.
+GPL-2.0-or-later, the same as Henge. See [LICENSE](LICENSE) and
+[docs/licensing.md](docs/licensing.md). macOS and the Mac boot ROM belong to Apple and are not
+part of this repository; the install downloads them from Apple.
