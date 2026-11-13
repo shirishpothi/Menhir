@@ -28,6 +28,10 @@ int menhir_remove_tree(const char *path) {
  closedir(d);return rc?rc:rmdir(path);
 }
 int menhir_copy_tree(const char *from,const char *to) {
+ /* share.c supplies canonical absolute paths. Reject copying a directory into
+  * itself before creating a descendant that recursive traversal would visit. */
+ size_t len=strlen(from);
+ if(!strncmp(from,to,len) && (!to[len]||to[len]=='/')) { errno=EINVAL;return -1; }
  struct stat st;if(lstat(from,&st))return -1;
  /* Do not follow symlinks across the private share boundary. */
  if(S_ISLNK(st.st_mode)) { errno=ENOTSUP;return -1; }

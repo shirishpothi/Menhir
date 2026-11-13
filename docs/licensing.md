@@ -36,3 +36,28 @@ These are Apple's, and none of the licences above apply to them:
 
 An exported Mac is a copy of that Mac, so its folder contains macOS and the ROM, as does
 one made by `tools/export_ios.sh`. Those folders are for your own devices, not for sharing.
+
+## Android services
+
+The Android build uses the vendored restore libraries above and fetches these
+source releases through `android/deps/fetch-sources.sh`, checking SHA-256 before
+extraction. Their source and licence files remain in the extracted source tree;
+packaging must include those notices alongside the existing restore-stack notices.
+
+| Code | Licence | Source |
+| --- | --- | --- |
+| curl 8.12.1 | curl licence (MIT-style) | [curl](https://curl.se/download/curl-8.12.1.tar.xz), `COPYING` |
+| libslirp 4.9.0 | BSD-3-Clause and source-file BSD notices | [libslirp](https://gitlab.freedesktop.org/slirp/libslirp/-/tree/v4.9.0), `COPYRIGHT` and source headers |
+| LZFSE 1.0 | BSD-3-Clause | [LZFSE](https://github.com/lzfse/lzfse/tree/lzfse-1.0), `LICENSE` |
+| LZ4 1.10.0 library | BSD-2-Clause | [LZ4](https://github.com/lz4/lz4/tree/v1.10.0/lib), `lib/LICENSE` |
+| Menhir's GLib subset and native adapters | GPL-2.0-or-later | `android/deps/glib/`, new `host/*_android.c` |
+
+Android does not use Husk's prebuilt GLib, libintl, pcre2 or libslirp. It uses a
+small local GLib subset for libslirp instead. The Mbed TLS already in `third_party`
+provides real TLS for curl and the restore stack.
+
+`android/deps/certs/apple_root.h` contains Apple's public X.509 Root CA certificate
+as trust data for signing-server verification, obtained from Apple's certificate
+site. It contains no Apple executable or implementation source. Its origin, hash
+and restricted use are documented in [Android services](android/services.md).
+Apple's ROM and IPSW remain downloads outside the repository.
