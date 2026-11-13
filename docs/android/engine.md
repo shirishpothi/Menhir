@@ -130,9 +130,8 @@ never guest keys. Guest IDs do not expose SVE or SME, and classification rejects
 those instruction groups. Apple implementation-defined system registers are
 handled in software. This is not a complete instruction emulator: unadvertised
 extensions and unknown SIMD encodings are not validated exhaustively. The
-Snapdragon hardware feature check and long-running guest workloads still need
-the real tablet. Its CPU, kernel page size, display and RAM must be measured
-before changing AGENTS.md's device facts.
+hardware feature check now passes on the real tablet. Long-running guest
+workloads remain only partly verified by the restore attempt below.
 
 ## Validation (2026-11-13)
 
@@ -208,3 +207,69 @@ write that run to `boot.log`. These install/boot commands are the intended
 procedure; completion is not yet verified. Monitor `du -sk .` as well as
 `/proc/PID/status`, and stop if allocated storage approaches 60 GiB. A sparse
 disk's logical length is not its allocated storage.
+
+### Restore blocker on the tablet
+
+The native download completed with `state=1`, no error, and exactly
+16,814,137,790 bytes. No IPSW was downloaded to the Mac. The restore ran with
+6 GiB RAM and one guest CPU, networking attached and audio disabled. It started
+at 2026-11-13 22:55:21 SGT. Milestones from `install.log`:
+
+| Elapsed | Evidence |
+| --- | --- |
+| 0.4 s | `Found device in DFU mode` |
+| 1.8 s | First `Received SHSH blobs` |
+| 3.6 s | `iBoot boot-stage=1` |
+| 6.2 s | `iBoot boot-stage=2`, build `iBoot-11881.140.96` |
+| 30.0 s | `Connected to com.apple.mobile.restored, version 15` |
+| 31.6 s | Root tickets sent, then `Waiting for NAND (28)` |
+| 68 s | `Restoring image (13)`; main image upload then verification completed |
+| 12 min 41 s | `Creating Protected Volume (67)` |
+| 12 min 46 s | Sending `Cryptex1,SystemOS` (5,167,382,528 bytes) |
+| 18 min 37 s | Last USB traffic; later image progress remained at 71% |
+
+The debugger found the restore sender in `socket_send`, through
+`_restore_send_file_data`, at `done=3693797376`, `total_size=5167382528`.
+CPU 0 was in `wait_for_interrupt`, not waiting for a translation/device mutex.
+The last guest USB acknowledgement was 971,573,063 with a window of 116,992;
+the host sent through sequence 971,690,055 and received no further acknowledgement.
+These values identify the stalled flow, not its root cause. The NDK debugger
+server accepted attachment as shell; Xcode LLDB captured the backtraces and
+detached. NDK LLDB itself could not start because its Python 3.11 dylib was missing.
+
+The run was stopped at the first unresolved restore blocker. It ran 1,505.915 s,
+executed 7,045,803 dispatcher blocks (4,679/s averaged over the run), and ended
+at guest PC `fffffe0019e29e68`. Sampled active phases reported roughly
+10,000–40,000 blocks/s; chained guest execution is not fully represented by
+these dispatcher counts. Peak RSS was 3,385,416 KiB (3.23 GiB); sampled RSS fell
+as low as 1.63 GiB later in the run. Host memory pressure temporarily reduced
+available memory to about 326 MiB and made adb commands slow.
+
+Android reported Awake, powered and `mStayOn=true` during the stall. No screen-off
+kill was observed. The original `stayon` setting, 0, was restored after stopping.
+Stopping exposed a restore-library exit-handler race (`FORTIFY: pthread_mutex_lock
+called on a destroyed mutex`). The CLI now uses `_exit` after draining disk
+workers and flushing disks, avoiding exit handlers while detached restore workers
+still own USB pointers. This shutdown fix compiles; a second full restore has not
+been run to verify it at the same stage.
+
+Retained under `/data/local/tmp/menhir/`:
+
+- `Sequoia_15.6.1_24G90.ipsw`: 16,814,137,790 bytes (15.66 GiB).
+- `disk.img`: 51,539,607,552 logical bytes (48 GiB), 16,247,017,472 allocated
+  bytes (15.13 GiB) at stop. This is an incomplete installation, not a bootable
+  system established by this run.
+- `aux.bin`: 33,570,816 logical bytes, 1,355,776 allocated bytes.
+- `install.log`: 222,886,933 bytes; `install.log.gz` is its compressed copy.
+  `rom.log`, `dfu-probe.log` and `dfu-final.log` retain the earlier probes.
+
+The directory used about 31.1 GiB before compressing the log. The IPSW and partial
+machine are deliberately retained. Local evidence is in `build-engine/`:
+`tablet-backtrace.txt`, `tablet-tests.log`, `mac-tests.log`, `mac-rom.log` and
+`mac-dfu.log`. These build artifacts are not committed.
+
+Restore did not return success. Installed-system first boot, serial kernel/launchd
+activity, final disk contents, guest networking end to end, audio, and snapshots
+remain unverified. No installed-system boot was attempted after the incomplete
+restore. The next investigation is why the guest stopped consuming the restored
+service's virtual USB stream during Cryptex upload.

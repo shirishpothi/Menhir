@@ -161,7 +161,12 @@ int main(int argc, char **argv) {
     hv_virtio_blk_stop(board.aux_blk);
     if (disk_path && (hv_disk_flush(&disk) || hv_disk_flush(&aux))) { perror("disk flush"); return 1; }
 #ifdef MENHIR_WITH_RESTORE
-    if (ipsw) return hv_install_result() == 0 ? 0 : 1;
+    if (ipsw) {
+        fflush(NULL);
+        /* The restore libraries register exit handlers that release USB state.
+           Their detached workers still use it, so skip those handlers. */
+        _exit(hv_install_result() == 0 ? 0 : 1);
+    }
 #endif
 #ifdef MENHIR_WITH_AUDIO
     hv_audio_detach();
