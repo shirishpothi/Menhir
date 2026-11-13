@@ -192,9 +192,10 @@ static void start_recording(HvPvgLite *p) {
     cap.seq = cap.swaps = 0, cap.pages_written = cap.bytes_written = 0, cap.npending = 0;
     fwrite(HV_PVGCAP_MAGIC, 1, 8, f);
     uint32_t head[2] = {HV_PVGCAP_VERSION, (uint32_t)cap.m->nram};
-    uint64_t ranges[2 * HV_MAX_RAM];
+    uint64_t ranges[2 * HV_MAX_RAM + 1];
     for (int i = 0; i < cap.m->nram; i++) ranges[2 * i] = cap.m->ram[i].pa, ranges[2 * i + 1] = cap.m->ram[i].size;
-    record(HV_PVGCAP_HEADER, head, sizeof head, ranges, 16ull * cap.m->nram);
+    ranges[2 * cap.m->nram] = (uint64_t)cap.m->ncpus; /* one CPU: everything that changes while a command runs is the GPU's */
+    record(HV_PVGCAP_HEADER, head, sizeof head, ranges, 16ull * cap.m->nram + 8);
     pthread_mutex_unlock(&cap.mu);
     size_t n = hv_pvg_lite_display_state(p, NULL, 0);
     if (n) {

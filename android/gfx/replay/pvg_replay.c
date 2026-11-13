@@ -190,12 +190,22 @@ static uint8_t *surface_pixels(HvPvgLite *p, uint64_t mapping, uint32_t *w_out, 
 
 /* ---- The replay ---- */
 
+/* What the replay itself last put in each page, by its CRC (0: never), to tell the backend's writes from the guest's.
+   In a recording made with more than one CPU, a page flagged as written while a command ran may be another CPU's
+   work (the recorder stops only the CPU that rang): if this backend left the page as the replay last put it, the
+   change is taken to be the guest's and applied. With one CPU every flagged page is the GPU's. */
+#define MAX_PAGES (1u << 22)
+static uint32_t *put_crc;
+static int guess_writers; /* a recording made with more than one CPU */
+
+static uint32_t page_crc(const uint8_t *p) { return (uint32_t)crc32(0, p, PAGE) | 1; }
+
 static int quiet;
 static const char *out_dir;
 static int tolerance = 2;
 
 typedef struct {
-    uint64_t frames, frames_ok, commands, pages, written_pages, written_differ, timeouts;
+    uint64_t frames, frames_ok, commands, pages, written_pages, written_differ, guest_pages, timeouts;
 } Stats;
 
 static int compare_frame(HvPvgLite *p, const uint8_t *rec, uint64_t len, Stats *st) {
@@ -292,6 +302,7 @@ int main(int argc, char **argv) {
         return 2;
     }
     machine = calloc(1, sizeof *machine);
+    put_crc = calloc(MAX_PAGES, 4);
     machine->ncpus = 2;
     HvPvgLite *lite = NULL;
     HvPvgMetal *backend = NULL;
@@ -304,7 +315,12 @@ int main(int argc, char **argv) {
         case HV_PVGCAP_HEADER: {
             uint32_t version, n;
             memcpy(&version, r.data, 4), memcpy(&n, r.data + 4, 4);
-            if (version != HV_PVGCAP_VERSION || n > HV_MAX_RAM) { fprintf(stderr, "pvg_replay: version %u, %u regions\n", version, n); return 2; }
+            if (version != HV_PVGCAP_VERSION || n > HV_MAX_RAM || r.len < 8 + 16ull * n + 8) { fprintf(stderr, "pvg_replay: version %u, %u regions\n", version, n); return 2; }
+            uint64_t cpus;
+            memcpy(&cpus, r.data + 8 + 16 * n, 8);
+            guess_writers = cpus != 1;
+            if (guess_writers)
+                fprintf(stderr, "pvg_replay: recorded with %llu CPUs: a page this backend failed to write can pass as the guest's\n", (unsigned long long)cpus);
             for (uint32_t i = 0; i < n; i++) {
                 HvRam *ram = &machine->ram[machine->nram++];
                 memcpy(&ram->pa, r.data + 8 + 16 * i, 8), memcpy(&ram->size, r.data + 16 + 16 * i, 8);
@@ -332,14 +348,19 @@ int main(int argc, char **argv) {
             uint32_t flags;
             if (unpack_page(r.data, r.len, &pa, &flags, page)) { fprintf(stderr, "pvg_replay: bad page record\n"); return 2; }
             uint8_t *d = hv_phys_ptr(machine, pa, PAGE);
-            if (!d) break;
+            if (!d || pa / PAGE >= MAX_PAGES) break;
             st.pages++;
             if (flags & HV_PVGCAP_PAGE_WRITTEN) {
-                st.written_pages++;
-                if (memcmp(d, page, PAGE)) st.written_differ++, cmd_diffs++;
-                if (free_running) break;
+                uint32_t had = put_crc[pa / PAGE], now = page_crc(d);
+                int ours = !guess_writers || (had ? now != had : now != page_crc((const uint8_t[PAGE]){0}));
+                if (ours) {
+                    st.written_pages++;
+                    if (memcmp(d, page, PAGE)) st.written_differ++, cmd_diffs++;
+                    if (free_running) break;
+                } else st.guest_pages++;
             }
             memcpy(d, page, PAGE);
+            put_crc[pa / PAGE] = page_crc(page);
             break;
         }
         case HV_PVGCAP_COMMAND: {
@@ -380,8 +401,9 @@ int main(int argc, char **argv) {
             fprintf(stderr, "pvg_replay: record type %u skipped\n", r.type);
         }
     }
-    printf("%llu commands, %llu pages, %llu GPU-written pages of which %llu differ (%s), %llu of %llu frames match, %llu timeouts\n",
-           (unsigned long long)st.commands, (unsigned long long)st.pages, (unsigned long long)st.written_pages,
+    printf("%llu commands, %llu pages, %llu written by the guest while a command ran, %llu written by the backend of which %llu differ (%s), "
+           "%llu of %llu frames match, %llu timeouts\n",
+           (unsigned long long)st.commands, (unsigned long long)st.pages, (unsigned long long)st.guest_pages, (unsigned long long)st.written_pages,
            (unsigned long long)st.written_differ, free_running ? "free-running" : "refreshed", (unsigned long long)st.frames_ok,
            (unsigned long long)st.frames, (unsigned long long)st.timeouts);
     hv_pvg_metal_destroy(backend);

@@ -12,14 +12,16 @@
    PREFIX-N.pvgcap: first the device's state, the display state and every page noted so far, then for each command
    the pages that changed and the pages it read for the first time, then the command. After each swap it writes the
    swapped surface's pixels as the backend left them, the reference a replay is compared with.
-   HV_PVG_CAPTURE_FRAMES=N ends a recording after N swaps (default 30). */
+   HV_PVG_CAPTURE_FRAMES=N ends a recording after N swaps (default 30). Record with one guest CPU (--cpus 1): the
+   recorder stops only the CPU that rang, so with more, pages other CPUs write while a command runs look like the
+   GPU's work. */
 
 struct HvMachine;
 typedef struct HvPvgLite HvPvgLite;
 
 /* Record types. Every record is {u32 type, u32 0, u64 length} then length bytes. */
 enum {
-    HV_PVGCAP_HEADER = 1,  /* u32 version, u32 ram regions, {u64 pa, u64 size}... */
+    HV_PVGCAP_HEADER = 1,  /* u32 version, u32 ram regions, {u64 pa, u64 size}..., u64 guest CPUs */
     HV_PVGCAP_STATE = 2,   /* hv_pvg_lite_state's blob */
     HV_PVGCAP_DISPLAY = 3, /* hv_pvg_lite_display_state's blob */
     HV_PVGCAP_PAGE = 4,    /* u64 pa, u32 stored bytes (0: all zero, 16384: raw, else zlib), u32 flags, data */
@@ -32,7 +34,7 @@ enum {
 /* A page's flags: it changed while the command before it ran, so the backend (almost always the GPU) wrote it. */
 #define HV_PVGCAP_PAGE_WRITTEN 1u
 #define HV_PVGCAP_MAGIC "PVGCAP\0\1"
-#define HV_PVGCAP_VERSION 1
+#define HV_PVGCAP_VERSION 2
 
 /* hv_phys_ptr for pvg_lite.c: notes the pages, and while recording copies a page the first time it is read. */
 void *hv_pvg_capture_phys(struct HvMachine *m, uint64_t pa, uint64_t len);

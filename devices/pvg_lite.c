@@ -68,6 +68,9 @@ int hv_pvg_trace_on(void) {
 #include <string.h>
 
 #include "../core/machine.h"
+#include "pvg_vulkan_capture.h"
+/* Every guest access goes through the capture (pvg_vulkan_capture.h), which notes the pages when asked to. */
+#define hv_phys_ptr hv_pvg_capture_phys
 
 #define MAX_CHANNELS 16
 
@@ -391,6 +394,7 @@ void hv_pvg_lite_complete(HvPvgLite *p, uint32_t ch, uint32_t stamp) {
     uint64_t buf = (uint64_t)reg(p, 0x1030) << 14;
     uint32_t *s = buf ? guest32(p, buf + 4 * ch) : NULL;
     if (s) __atomic_store_n(s, stamp, __ATOMIC_RELEASE);
+    hv_pvg_capture_complete(ch, stamp);
     /* The interrupt now, from this thread: the GIC wakes the CPU it goes to. Left for
        CPU 0's next poll this could wait for its timer, up to 10 ms if it is idle, and
        the guest waits for this between the many batches of work in a frame. */
@@ -674,7 +678,10 @@ static void do_channel(HvPvgLite *p, uint32_t ch) {
         if (p->metal) {
             uint32_t *copy = malloc(hdr[1]);
             ring_read(p, table, size, rd, copy, hdr[1]);
+            uint32_t *kept = NULL; /* recording (HV_PVG_CAPTURE): the command, for after the backend has freed its copy */
+            if (hv_pvg_capture_command(p, ch, copy, hdr[1]) && (kept = malloc(hdr[1]))) memcpy(kept, copy, hdr[1]);
             hv_pvg_metal_submit(p->metal, p, ch, copy, hdr[1]);
+            if (kept) hv_pvg_capture_wait(p, ch, kept, hdr[1]), free(kept);
         } else {
             last = hdr[2], any = 1;
         }
@@ -712,7 +719,7 @@ static void do_mapper(HvPvgLite *p) {
         uint64_t ring = p->io_regs[0], size = p->io_regs[0x8 / 8], want = p->io_regs[0x18 / 8];
         for (uint64_t i = p->io_regs[0x20 / 8]; i < want && size; i++) {
             uint32_t *e = hv_phys_ptr(p->m, ring + (i % size) * 16, 16);
-            if (e && e[0] == 2) hv_pvg_metal_unmap(p->metal, e[1]);
+            if (e && e[0] == 2) hv_pvg_capture_unmap(e[1]), hv_pvg_metal_unmap(p->metal, e[1]);
         }
     }
     p->io_regs[0x20 / 8] = p->io_regs[0x18 / 8];
@@ -789,7 +796,7 @@ static void gfx_write(void *opaque, uint64_t off, uint64_t v, unsigned size) {
     } else if (p->log && off != 0x1020) {
         fprintf(stderr, "hengevm: pvg-lite: write +%llx = %llx\n", (unsigned long long)off, (unsigned long long)v);
     }
-    if (off == 0x1220 && p->metal) hv_pvg_metal_cursor_moved(p->metal); /* the display's doorbell: the pointer moved */
+    if (off == 0x1220 && p->metal) hv_pvg_capture_cursor(), hv_pvg_metal_cursor_moved(p->metal); /* the display's doorbell: the pointer moved */
 }
 
 static uint64_t iosfc_read(void *opaque, uint64_t off, unsigned size) {
