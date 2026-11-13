@@ -347,7 +347,9 @@ module_flags(struct stela_air_metadata *t)
    enum { IR_FLAG_ERROR = 1, IR_FLAG_MAX = 7 };
    const char *keys[] = {"wchar_size", "frame-pointer", "air.max_device_buffers",
       "air.max_constant_buffers", "air.max_threadgroup_buffers", "air.max_textures",
-      "air.max_read_write_textures", "air.max_samplers"};
+      "air.max_read_write_textures", "air.max_samplers",
+      /* Menhir: macOS 15.6's compiler marks libraries with constexpr samplers with this (behavior Max, i1 true). */
+      "air.workaround.sampler_state_variable_length_encoding"};
    LLVMValueRef flags[AIR_MAX_METADATA_OPERANDS];
    unsigned count, seen = 0;
    if (!stela_air_named_md(t, "llvm.module.flags", flags, &count))
@@ -2565,6 +2567,9 @@ stela_air_metadata_stage(struct stela_air_metadata *m, LLVMValueRef fn,
    entry_facts(m, fn, &r->entry.threadgroup_bytes, &r->entry.discards);
    for (unsigned i = 0; i < r->entry.input_count; i++) {
       struct stela_air_stage_io *io = &r->inputs[i];
+      /* Menhir: the vertex fetch functions macOS 15's Metal generates leave builtins such as air.vertex_id
+         unnamed; the name is only for reflection. */
+      if (!io->name && io->type_name) io->name = "unnamed", io->name_bytes = 7;
       /* Control points name their members instead. */
       if (io->semantic != STELA_AIR_CONTROL_POINTS &&
           (!stage_text(io->name, io->name_bytes) || !stage_text(io->type_name, io->type_name_bytes)))

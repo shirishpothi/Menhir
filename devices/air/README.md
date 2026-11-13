@@ -7,8 +7,14 @@ was chosen are in `docs/android/graphics.md`, section 3.
 | --- | --- | --- |
 | `air_library.c` | a metallib's function list and each function's bitcode | Menhir |
 | `air_spirv.c` | AIR → NIR (Stela) → lowering for the emitter → SPIR-V | Menhir |
-| `stela/` | Stela's AIR to NIR compiler, GPL-2.0-or-later | [Stela](https://github.com/tylertms/Stela) `crates/stela-driver-gpu/src/compiler` at `25f661c`, unchanged; `LICENSE` and `NOTICE` are Stela's |
+| `stela/` | Stela's AIR to NIR compiler, GPL-2.0-or-later | [Stela](https://github.com/tylertms/Stela) `crates/stela-driver-gpu/src/compiler` at `25f661c`, with the changes marked `Menhir:`; `LICENSE` and `NOTICE` are Stela's |
 | `ntv/` | Mesa's NIR to SPIR-V emitter, MIT | Mesa 26.2.5 (`ddaf85e3`) `src/gallium/drivers/zink/nir_to_spirv`, with the changes marked `Menhir:` |
+
+Changes to `stela/`, each marked in the source:
+
+- `air_metadata.c` accepts the module flag `air.workaround.sampler_state_variable_length_encoding`, which macOS
+  15.6's shaders carry (Stela was written against macOS 27.2's). What it changes in the constexpr sampler encoding
+  is not known; a shader that uses one should be checked against Metal by replay.
 
 Changes to `ntv/`, each marked in the source:
 

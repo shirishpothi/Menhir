@@ -23,6 +23,10 @@ typedef struct {
     size_t link_size;
     const char *link_entry;
     uint32_t workgroup[3];
+    /* The sampler for a constexpr sampler state in Apple's encoding: its MTLResourceID as the backend's queries
+       answer it (the low half is its index in the sampler heap). */
+    uint64_t (*constexpr_sampler)(void *ctx, uint64_t state);
+    void *ctx;
     int print_nir; /* dump the NIR to stdout */
 } AirSpirvOptions;
 

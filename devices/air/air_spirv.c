@@ -82,6 +82,28 @@ static nir_variable *push_block(nir_shader *nir) {
     return v;
 }
 
+/* The emitter has no ball_* or bany_* (vector equality): they become scalar compares. */
+static bool is_vector_reduction(const nir_instr *instr, const void *data) {
+    (void)data;
+    if (instr->type != nir_instr_type_alu) return false;
+    const char *name = nir_op_infos[nir_instr_as_alu(instr)->op].name;
+    return !strncmp(name, "ball_", 5) || !strncmp(name, "bany_", 5);
+}
+
+/* Vulkan has 32-bit derivatives only (Metal has half ones): widen them, as Stela's NAK path does (patch 0005). */
+static unsigned widen_derivatives(const nir_instr *instr, void *data) {
+    (void)data;
+    if (instr->type != nir_instr_type_intrinsic) return 0;
+    nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+    switch (intr->intrinsic) {
+    case nir_intrinsic_ddx: case nir_intrinsic_ddx_coarse: case nir_intrinsic_ddx_fine:
+    case nir_intrinsic_ddy: case nir_intrinsic_ddy_coarse: case nir_intrinsic_ddy_fine:
+        return intr->def.bit_size < 32 ? 32 : 0;
+    default:
+        return 0;
+    }
+}
+
 /* f2f16 rounding to nearest even is Vulkan's (and Adreno's) rounding for OpFConvert anyway. */
 static bool lower_rtne(nir_builder *b, nir_alu_instr *alu, void *data) {
     (void)b, (void)data;
@@ -119,6 +141,17 @@ static int compile(const void *bitcode, size_t size, const char *entry, const Ai
         linked[i] = (struct stela_metal_linked_varying){reflection.names + v->identifier, v->identifier_bytes, v->per_primitive};
     }
     struct stela_metal_specialization spec = {.varyings = linked, .varying_count = nv};
+    /* Constexpr samplers: each state the module declares gets the backend's sampler for it. */
+    static uint64_t states[STELA_METAL_SAMPLER_STATES];
+    static struct stela_air_constexpr_sampler samplers[STELA_METAL_SAMPLER_STATES];
+    uint32_t ns = 0;
+    if (!stela_metal_sampler_states(bitcode, size, states, &ns, &error)) {
+        snprintf(out->error, sizeof out->error, "constexpr samplers: error %d: %s", (int)error.kind, error.detail);
+        return -1;
+    }
+    for (uint32_t i = 0; i < ns && opt->constexpr_sampler; i++)
+        samplers[i] = (struct stela_air_constexpr_sampler){states[i], opt->constexpr_sampler(opt->ctx, states[i])};
+    spec.samplers = samplers, spec.sampler_count = opt->constexpr_sampler ? ns : 0;
     for (int i = 0; i < 3; i++) spec.workgroup_size[i] = opt->workgroup[i] ? opt->workgroup[i] : 1;
     nir_shader *nir = stela_metal_compile(bitcode, size, entry, &target, &spec, &error);
     if (!nir) {
@@ -131,6 +164,8 @@ static int compile(const void *bitcode, size_t size, const char *entry, const Ai
     NIR_PASS(pushes, nir, nir_shader_intrinsics_pass, lower_push_constant, nir_metadata_control_flow, block);
     if (!pushes) exec_node_remove(&block->node);
     NIR_PASS(_, nir, nir_shader_alu_pass, lower_rtne, nir_metadata_control_flow, NULL);
+    NIR_PASS(_, nir, nir_lower_alu_to_scalar, is_vector_reduction, NULL);
+    NIR_PASS(_, nir, nir_lower_bit_size, widen_derivatives, NULL);
     NIR_PASS(_, nir, nir_lower_fp16_casts, nir_lower_fp16_rtz | nir_lower_fp16_ru | nir_lower_fp16_rd);
     ntv_shader_prepare(nir);
     if (print_nir) {

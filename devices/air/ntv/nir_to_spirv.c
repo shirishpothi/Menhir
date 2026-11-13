@@ -24,6 +24,13 @@
 #include "nir_to_spirv.h"
 #include "spirv_builder.h"
 
+#include <setjmp.h>
+
+/* Menhir: what the emitter cannot translate fails this shader, not the process (the emulator keeps running and
+   draws without that pipeline). nir_to_spirv returns NULL. */
+static _Thread_local jmp_buf *ntv_bail;
+#define NTV_UNSUPPORTED(what) do { if (ntv_bail) longjmp(*ntv_bail, 1); UNREACHABLE(what); } while (0)
+
 #include "nir.h"
 #include "nir_builder.h"
 #include "pipe/p_state.h"
@@ -2314,7 +2321,7 @@ emit_alu(struct ntv_context *ctx, nir_alu_instr *alu)
       fprintf(stderr, "emit_alu: not implemented (%s)\n",
               nir_op_infos[alu->op].name);
 
-      UNREACHABLE("unsupported opcode");
+      NTV_UNSUPPORTED("unsupported opcode");
       return;
    }
 
@@ -3501,7 +3508,7 @@ emit_subgroup(struct ntv_context *ctx, nir_intrinsic_instr *intr)
    default:
       fprintf(stderr, "emit_subgroup: reduction op not implemented (%s)\n",
               nir_intrinsic_infos[nir_intrinsic_reduction_op(intr)].name);
-      UNREACHABLE("unhandled intrinsic");
+      NTV_UNSUPPORTED("unhandled intrinsic");
    }
 
    SpvGroupOperation groupop;
@@ -3520,7 +3527,7 @@ emit_subgroup(struct ntv_context *ctx, nir_intrinsic_instr *intr)
    default:
       fprintf(stderr, "emit_subgroup: not implemented (%s)\n",
               nir_intrinsic_infos[intr->intrinsic].name);
-      UNREACHABLE("unhandled intrinsic");
+      NTV_UNSUPPORTED("unhandled intrinsic");
    }
    spirv_builder_emit_cap(&ctx->builder, cluster_size ? SpvCapabilityGroupNonUniformClustered : SpvCapabilityGroupNonUniformArithmetic);
 
@@ -3590,7 +3597,7 @@ emit_subgroup_quad(struct ntv_context *ctx, nir_intrinsic_instr *intr)
    default:
       fprintf(stderr, "emit_subgroup_quad: not implemented (%s)\n",
               nir_intrinsic_infos[intr->intrinsic].name);
-      UNREACHABLE("unhandled intrinsic");
+      NTV_UNSUPPORTED("unhandled intrinsic");
    }
    spirv_builder_emit_cap(&ctx->builder, SpvCapabilityGroupNonUniformQuad);
 
@@ -3645,7 +3652,7 @@ emit_shuffle(struct ntv_context *ctx, nir_intrinsic_instr *intr)
    default:
       fprintf(stderr, "emit_shuffle: not implemented (%s)\n",
               nir_intrinsic_infos[intr->intrinsic].name);
-      UNREACHABLE("unhandled intrinsic");
+      NTV_UNSUPPORTED("unhandled intrinsic");
    }
    nir_alu_type atype, unused;
    SpvId src0 = get_src(ctx, &intr->src[0], &atype);
@@ -4134,7 +4141,7 @@ emit_intrinsic(struct ntv_context *ctx, nir_intrinsic_instr *intr)
    default:
       fprintf(stderr, "emit_intrinsic: not implemented (%s)\n",
               nir_intrinsic_infos[intr->intrinsic].name);
-      UNREACHABLE("unsupported intrinsic");
+      NTV_UNSUPPORTED("unsupported intrinsic");
    }
 }
 
@@ -5054,6 +5061,14 @@ nir_to_spirv(struct nir_shader *s, const struct ntv_info *sinfo)
 
    struct ntv_context ctx = {0};
    ctx.mem_ctx = ralloc_context(NULL);
+   jmp_buf bail;
+   if (setjmp(bail)) {
+      ntv_bail = NULL;
+      ntv_bail = NULL;
+   ralloc_free(ctx.mem_ctx);
+      return NULL;
+   }
+   ntv_bail = &bail;
    ctx.nir = s;
    ctx.builder.mem_ctx = ctx.mem_ctx;
    assert(sinfo->spirv_version >= SPIRV_VERSION(1, 0));
@@ -5601,11 +5616,13 @@ nir_to_spirv(struct nir_shader *s, const struct ntv_info *sinfo)
    ret->tcs_vertices_out_word = tcs_vertices_out_word;
    assert(ret->num_words == num_words);
 
+   ntv_bail = NULL;
    ralloc_free(ctx.mem_ctx);
 
    return ret;
 
 fail:
+   ntv_bail = NULL;
    ralloc_free(ctx.mem_ctx);
 
    if (ret)

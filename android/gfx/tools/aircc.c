@@ -13,6 +13,14 @@
 #include "air_library.h"
 #include "air_spirv.h"
 
+/* Stand-in samplers for constexpr sampler states: the backend makes real ones. */
+static uint64_t next_sampler = 1;
+static uint64_t constexpr_sampler(void *ctx, uint64_t state) {
+    (void)ctx;
+    printf("  constexpr sampler %#llx -> %llu\n", (unsigned long long)state, (unsigned long long)next_sampler);
+    return next_sampler++;
+}
+
 static uint8_t *slurp(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
@@ -41,7 +49,7 @@ int main(int argc, char **argv) {
         for (int k = 0; k < n && k < 64; k++) {
             AirSpirv s;
             /* A fragment function links with the library's first vertex function, if it has one. */
-            AirSpirvOptions o = {.print_nir = print_nir, .workgroup = {64, 1, 1}};
+            AirSpirvOptions o = {.print_nir = print_nir, .workgroup = {64, 1, 1}, .constexpr_sampler = constexpr_sampler};
             for (int v = 0; fn[k].type == AIR_FRAGMENT && v < n && v < 64; v++)
                 if (fn[v].type == AIR_VERTEX) {
                     o.link_bitcode = fn[v].bitcode, o.link_size = fn[v].bitcode_size, o.link_entry = fn[v].name;
