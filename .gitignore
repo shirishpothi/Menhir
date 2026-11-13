@@ -1,1 +1,6 @@
 build/
+build-*/
+android/**/build/
+android/**/.gradle/
+android/**/.cxx/
+local.properties

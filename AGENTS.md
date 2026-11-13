@@ -65,8 +65,17 @@ that works and name it in your final report so the merge is easy.
   after your area, run one emulator at most, and shut it down when you finish
   (`adb emu kill`, `./gradlew --stop`, no stray `qemu-system-*`, `netsimd` or `java`).
 - Shell is zsh with BSD tools; GNU ones are `g`-prefixed. Quote globs.
-- Commit small and often on your own branch with clear messages. Do not push, force-push,
-  or touch `main`; the orchestrator merges.
+- **This checkout is shared.** Four agents work in this one working tree, on `main`, at the
+  same time. So:
+  - Never switch branches, stash, reset, rebase, clean, or check out files you did not write.
+    Files you do not recognise belong to another agent; leave them alone.
+  - Commit small and often. Stage exact paths (`git add path ...`, never `git add -A` or
+    `git commit -a`), look at `git diff --cached` first, and commit only your own files.
+    If `git` reports `index.lock`, wait a few seconds and retry; do not delete the lock.
+  - Do not push or force-push. The orchestrator handles the remote.
+  - Use your own build directory: `make B=build-<area>` on the Mac, and
+    `android/<your dir>/build/` for CMake and Gradle. Never build into another agent's.
+  - A broken build in someone else's paths is theirs to fix. Work around it and report it.
 - Verify what you claim. Say what you ran and what it printed. If something is untested or
   does not work, say so plainly in your final report.
 - Write docs and comments in plain, direct English, in the style of the upstream docs.
