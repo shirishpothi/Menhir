@@ -1,5 +1,6 @@
 /* Headless Android machine. CPU workers block asynchronous signals while in JIT code. */
 #include "dispatch.h"
+#include "platform.h"
 #include "jit_signal.h"
 #include "vmapple.h"
 #include "net_slirp.h"
@@ -26,7 +27,45 @@ static void stop(int sig) {
     for (int i = 0; i < ncpus; i++) atomic_store(&cpu[i].halted, HV_HALT_HOST);
     hv_machine_kick_all(&m);
 }
+/* Runs on CPU 0 with the machine lock held, including during WFI ticks. */
+static void usb_watchdog(void) {
+    static int enabled = -1;
+    static uint64_t last_change, last_dump;
+    static uint16_t prev[2];
+    if (enabled < 0) enabled = getenv("HV_USB_WATCHDOG") != NULL;
+    HvVirtioUsb *d = board.vusb;
+    if (!enabled || !d || !d->pci_on) return;
+    uint64_t now = hv_host_counter();
+    if (!last_change || prev[0] != d->vio.q[0].last_avail || prev[1] != d->vio.q[1].last_avail) {
+        prev[0] = d->vio.q[0].last_avail; prev[1] = d->vio.q[1].last_avail;
+        last_change = now;
+    }
+    if (now - last_change < 10 * 24000000ull || now - last_dump < 30 * 24000000ull) return;
+    last_dump = now;
+    fprintf(stderr, "usb watchdog: idle %.1f s isr=%u status=%u\n", (now-last_change)/24000000.0, d->vio.isr, d->vio.status);
+    pthread_mutex_lock(&d->mu);
+    fprintf(stderr, "usb watchdog: session=%u online=%d out=%u/%u in=%u/%u\n", d->session, d->online, d->out_head, d->out_tail, d->in_head, d->in_tail);
+    pthread_mutex_unlock(&d->mu);
+    for (int i = 0; i < 2; i++) {
+        HvVirtq *q = &d->vio.q[i];
+        uint16_t *a = hv_phys_ptr(&m, q->avail, 4), *u = hv_phys_ptr(&m, q->used, 4);
+        fprintf(stderr, "usb watchdog: q%d enabled=%u size=%u last=%u avail=%u used=%u flags=%u\n", i, q->enabled, q->size, q->last_avail, a ? a[1] : 0, u ? u[1] : 0, a ? a[0] : 0);
+    }
+    HvGic *g = board.gic;
+    pthread_mutex_lock(&g->mu);
+    for (int i = 0; i < ncpus; i++) {
+        HvCpu *c = &cpu[i];
+        HvGicCpu *gc = &g->cpu[i];
+        fprintf(stderr, "usb watchdog: cpu%d pc=%llx exit=%u daif=%llx timer=%llu pmr=%llu groups=%llu/%llu depth=%d\n", i, (unsigned long long)c->pc, c->exit_reason, (unsigned long long)c->daif, (unsigned long long)c->timer_due, (unsigned long long)gc->pmr, (unsigned long long)gc->igrpen0, (unsigned long long)gc->igrpen1, gc->depth);
+        for (int j = 0; j < 32; j++) if (gc->enabled[j] || gc->latch[j] || gc->level[j] || gc->active[j])
+            fprintf(stderr, "usb watchdog: cpu%d irq%d en=%u latch=%u level=%u active=%u\n", i,j,gc->enabled[j],gc->latch[j],gc->level[j],gc->active[j]);
+    }
+    for (int j = 32; j < HV_GIC_NUM_IRQS; j++) if (g->enabled[j] || g->latch[j] || g->level[j] || g->active[j])
+        fprintf(stderr, "usb watchdog: irq%d en=%u latch=%u level=%u active=%u\n", j,g->enabled[j],g->latch[j],g->level[j],g->active[j]);
+    pthread_mutex_unlock(&g->mu);
+}
 static void poll_board(void) {
+    usb_watchdog();
 #ifdef MENHIR_WITH_NET
     if (net_on) hv_net_poll();
 #endif

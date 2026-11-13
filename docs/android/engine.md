@@ -274,3 +274,23 @@ activity, final disk contents, guest networking end to end, audio, and snapshots
 remain unverified. No installed-system boot was attempted after the incomplete
 restore. The next investigation is why the guest stopped consuming the restored
 service's virtual USB stream during Cryptex upload.
+
+### USB stall diagnostics
+
+Set `HV_USB_WATCHDOG=1` on the Android CLI to dump USB queue indices, host
+ring occupancy, CPU PC/exit state, timer deadlines, and enabled/pending/active
+GIC interrupts after ten seconds without virtqueue progress (at most once per
+thirty seconds). Endpoint workers report outstanding waits every ten seconds.
+The board dump runs on CPU 0 under the machine lock, including WFI ticks; it
+is an idle-transport diagnostic, not proof of deadlock. A full response ring
+now reports each dropped response instead of discarding it silently.
+Capture stdout separately for guest UART output and stderr for restore logs.
+
+Review of the original compressed log found eleven guest mux-control errors
+at the stall: first `Expected 53023 received 53024`, then later sequence numbers
+were rejected. This narrows the investigation to missing/reordered mux traffic;
+it does not establish where the packet was lost. The first instrumented retry
+on the retained partial disk failed early with restore error 47: `newfs_apfs`
+reported an already synthesized APFS device, `Resource busy`. The partial disk
+was preserved. Further retries use separate blank sparse storage under the
+same tablet work directory and reuse the retained IPSW.

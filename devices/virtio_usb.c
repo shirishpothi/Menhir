@@ -23,7 +23,10 @@ static void put_msg(HvVirtioUsb *d, HvVusbMsg *m) {
     if (d->log) fprintf(stderr, "virtio-usb: response type %u ep %#x len %u\n", m->type, m->ep, m->len);
     pthread_mutex_lock(&d->mu);
     if (d->in_tail - d->in_head < HV_VUSB_RING) d->in[d->in_tail++ % HV_VUSB_RING] = *m;
-    else msg_free(m);
+    else {
+        fprintf(stderr, "virtio-usb: response ring full; dropped type %u ep %#x len %u\n", m->type, m->ep, m->len);
+        msg_free(m);
+    }
     pthread_cond_broadcast(&d->cv);
     pthread_mutex_unlock(&d->mu);
 }

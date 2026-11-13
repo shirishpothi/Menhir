@@ -307,6 +307,9 @@ static void run(Xfer *x) {
             return;
         }
         waited += slice;
+        if (waited % 10000 == 0 && getenv("HV_USB_WATCHDOG"))
+            fprintf(stderr, "usb watchdog: ep=%02x waiting=%dms len=%d acks=%d in=%d outstanding=%u\n",
+                    ep, waited, t->length, acks, in, g_outstanding[ix]);
         if (__atomic_load_n(&x->cancel, __ATOMIC_ACQUIRE)) {
             complete(x, LIBUSB_TRANSFER_CANCELLED, 0);
             return;
