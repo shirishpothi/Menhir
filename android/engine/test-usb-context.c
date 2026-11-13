@@ -33,10 +33,11 @@ int main(void) {
     complete(xfer_of(ta), LIBUSB_TRANSFER_COMPLETED, 0);
     complete(xfer_of(tb), LIBUSB_TRANSFER_COMPLETED, 0);
     const struct libusb_pollfd **pa = libusb_get_pollfds(NULL), **pb = libusb_get_pollfds(other);
-    assert(pa && pb && pa[0]->fd != pb[0]->fd);
+    assert(pa && pb);
     struct timeval tv = {0, 0};
     libusb_handle_events_timeout(other, &tv);
     if (callbacks != 1) { fprintf(stderr, "foreign context dispatched %d callbacks (expected 1)\n", callbacks); return 1; }
+    assert(pa[0]->fd != pb[0]->fd);
     struct pollfd ready = {pa[0]->fd, POLLIN, 0};
     assert(poll(&ready, 1, 0) == 1); /* the foreign loop left our wakeup intact */
     libusb_handle_events_timeout(NULL, &tv);
