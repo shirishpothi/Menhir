@@ -273,12 +273,19 @@ static uint64_t stamp_base;
 static int wait_stamp(uint32_t ch, uint32_t stamp) {
     uint32_t *s = stamp_base ? hv_phys_ptr(machine, stamp_base + 4ull * ch, 4) : NULL;
     if (!s) return 0;
-    for (int i = 0; i < 2400000; i++) { /* up to 120 s for cold shader compilation */
+    struct timespec start, now;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (;;) { /* cold shader compilation; use elapsed time, not sleep iterations */
         if ((int32_t)(__atomic_load_n(s, __ATOMIC_ACQUIRE) - stamp) >= 0) return 0;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if ((now.tv_sec - start.tv_sec) * 1000000000LL + now.tv_nsec - start.tv_nsec >= 120000000000LL) return -1;
         usleep(50);
     }
-    return -1;
 }
+
+#if defined(MENHIR_GFX_WINDOW_TEST)
+extern void *pvg_replay_window;
+#endif
 
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -335,6 +342,9 @@ int main(int argc, char **argv) {
             }
             lite = hv_pvg_lite_create(machine, NULL, 0, 0, 0, 0);
             backend = hv_pvg_metal_create(lite);
+#if defined(MENHIR_GFX_WINDOW_TEST)
+            hv_pvg_metal_set_layer(backend, pvg_replay_window);
+#endif
             if (!backend) { fprintf(stderr, "pvg_replay: the backend did not start\n"); return 2; }
             break;
         }
@@ -414,6 +424,22 @@ done:
            (unsigned long long)st.commands, (unsigned long long)st.pages, (unsigned long long)st.guest_pages, (unsigned long long)st.written_pages,
            (unsigned long long)st.written_differ, free_running ? "free-running" : "refreshed", (unsigned long long)st.frames_ok,
            (unsigned long long)st.frames, (unsigned long long)st.timeouts);
+#if defined(MENHIR_GFX_WINDOW_TEST)
+    const uint8_t *frame;
+    uint32_t fw, fh;
+    if (hv_pvg_metal_frame(backend, &frame, &fw, &fh)) return 2;
+    uint8_t *snapshot = malloc((size_t)fw * fh * 4);
+    int snapshot_ok = snapshot && !hv_pvg_metal_snapshot(backend, snapshot, fw, fh) &&
+                      !memcmp(snapshot, frame, (size_t)fw * fh * 4);
+    free(snapshot);
+    if (!snapshot_ok) return 2;
+    printf("window: frame and snapshot agree (%ux%u)\n", fw, fh);
+    sleep(30); /* leave the last frame visible for a shell screenshot */
+    hv_pvg_metal_set_layer(backend, NULL);
+    hv_pvg_metal_set_layer(backend, pvg_replay_window); /* exercise recreation */
+    sleep(4);
+    hv_pvg_metal_set_layer(backend, NULL);
+#endif
     hv_pvg_metal_destroy(backend);
     return st.frames_ok == st.frames && !st.timeouts ? 0 : 1;
 }

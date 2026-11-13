@@ -270,6 +270,12 @@ The recording is version 1 and does not identify the CPU count. Replay uses the 
 a page the backend did not change may be treated as a guest write. Thus free-running replay is useful image
 regression evidence, but not proof that every GPU-written page was attributed correctly.
 
+Presentation to an `ANativeWindow` through a Vulkan swapchain (`devices/pvg_vulkan_present.h`) and a window test
+(`android/gfx/window/`, `libpvg_replay_window.so`) are in the tree. An earlier version showed the recording in a
+real window on the tablet, stretched; it now letterboxes to keep the aspect ratio, which builds but has not been
+seen on the tablet. The app's real-engine build links the Vulkan backend instead of `devices/pvg_null.c`; it
+builds, but has not been run on any device.
+
 First-frame invocation (17 commands, 1920×1080 RGhA; default tolerance 2/255, at least 99.9% of pixels):
 
 ```sh

@@ -19,7 +19,11 @@
 #include <time.h>
 #include <zlib.h>
 
+#if defined(__ANDROID__)
+#define VK_USE_PLATFORM_ANDROID_KHR
+#endif
 #include <vulkan/vulkan.h>
+#include "pvg_vulkan_present.h"
 
 #include "pvg_lite.h"
 #include "pvg_vulkan_desc.h"
@@ -281,7 +285,12 @@ typedef struct HvPvgMetal {
     uint8_t *cursor;
     uint32_t cursor_w, cursor_h, cursor_stride;
     int cursor_hot_x, cursor_hot_y, cursor_shown;
-    void *window; /* ANativeWindow * */
+    pthread_mutex_t frame_mu;
+    uint8_t *frame;
+    uint32_t frame_w, frame_h;
+#if defined(__ANDROID__)
+    Display *display;
+#endif
     _Atomic uint64_t gpu_frames;
 
     uint64_t execs, draws, dispatches, failed_draws;
@@ -1796,14 +1805,23 @@ static void exec(Backend *b, const uint32_t *a, uint32_t len) {
 
 /* ---- The display ---- */
 
+static int read_screen(Backend *b, uint8_t *bgra, uint32_t w, uint32_t h);
+
 static void present(Backend *b, uint64_t mapping) {
     b->on_screen = mapping;
     b->gpu_frames++;
-}
-
-static void set_window(Backend *b, void *window) {
-    (void)b;
-    if (window) complain("window presentation is not implemented");
+    Surface *s = mapping < b->nsurfaces ? b->surfaces[mapping] : NULL;
+    if (!s) return;
+    pthread_mutex_lock(&b->frame_mu);
+    uint8_t *frame = realloc(b->frame, (size_t)s->width * s->height * 4);
+    if (frame) {
+        b->frame = frame; b->frame_w = s->width; b->frame_h = s->height;
+        read_screen(b, frame, s->width, s->height);
+#if defined(__ANDROID__)
+        display_send(b->display, frame, s->width, s->height);
+#endif
+    }
+    pthread_mutex_unlock(&b->frame_mu);
 }
 
 static void cursor_glyph(Backend *b, const uint32_t *a, uint32_t n) {
@@ -1836,7 +1854,7 @@ static void run(Backend *b, Cmd *c) {
         return;
     }
     if (c->kind == 2) { if (b->on_screen) present(b, b->on_screen); return; }
-    if (c->kind == 3) { set_window(b, c->layer); return; }
+
     uint32_t *cmd = c->words, len = c->len;
     uint32_t op = cmd[0] & 0xffff, skip = (cmd[0] >> 16) * 8;
     const uint32_t *args = (const uint32_t *)((const uint8_t *)cmd + 12 + skip);
@@ -1868,6 +1886,7 @@ static void run(Backend *b, Cmd *c) {
         if (op == 8 && n >= 16) present(b, (uint64_t)args[3] << 32 | args[2]);
         if (op == 4) cursor_glyph(b, args, n);
         if (op == 5 && n >= 8) b->cursor_shown = args[1] & 1;
+        if ((op == 4 || op == 5) && b->on_screen) present(b, b->on_screen);
     }
     hv_pvg_lite_complete(b->lite, c->channel, cmd[2]);
 }
@@ -2035,6 +2054,10 @@ HvPvgMetal *hv_pvg_metal_create(HvPvgLite *lite) {
     Backend *b = calloc(1, sizeof *b);
     b->lite = lite;
     if (init_vulkan(b)) { free(b); return NULL; }
+    pthread_mutex_init(&b->frame_mu, NULL);
+#if defined(__ANDROID__)
+    b->display = display_create();
+#endif
     pthread_mutex_init(&b->mu, NULL);
     pthread_cond_init(&b->cv, NULL);
     pthread_cond_init(&b->idle_cv, NULL);
@@ -2051,6 +2074,11 @@ void hv_pvg_metal_destroy(HvPvgMetal *m) {
     pthread_mutex_unlock(&b->mu);
     pthread_join(b->thread, NULL);
     vkDeviceWaitIdle(b->device);
+#if defined(__ANDROID__)
+    display_destroy(b->display);
+#endif
+    pthread_mutex_destroy(&b->frame_mu);
+    free(b->frame);
 
     for (int t = 0; t < MAX_TASKS; t++) {
         for (uint32_t i = 0; i < b->tasks[t].n; i++) free_object(b, b->tasks[t].refs[i]);
@@ -2091,23 +2119,26 @@ void hv_pvg_metal_unmap(HvPvgMetal *m, uint32_t mapping) {
 
 void hv_pvg_metal_cursor_moved(HvPvgMetal *m) {
     Backend *b = m;
-    if (!b->window) return;
+
     Cmd *c = calloc(1, sizeof *c);
     c->kind = 2;
     enqueue(m, c);
 }
 
-/* Window presentation is outside the off-screen replay milestone. */
+/* Surface callbacks synchronously retire the old surface before its owner returns. */
 void hv_pvg_metal_set_layer(HvPvgMetal *m, void *layer) {
-    (void)m;
-    if (layer) complain("window presentation is not implemented");
+#if defined(__ANDROID__)
+    Backend *b = m;
+    if (b) display_window(b->display, layer);
+#else
+    (void)m; (void)layer;
+#endif
 }
 
 uint64_t hv_pvg_metal_gpu_frames(HvPvgMetal *m) { return m ? ((Backend *)m)->gpu_frames : 0; }
 
 /* The shown surface, small, BGRA: read from the guest's memory, where every exec that draws it leaves it. */
-int hv_pvg_metal_snapshot(HvPvgMetal *m, uint8_t *bgra, uint32_t w, uint32_t h) {
-    Backend *b = m;
+static int read_screen(Backend *b, uint8_t *bgra, uint32_t w, uint32_t h) {
     if (!b || !b->on_screen || !w || !h) return -1;
     Surface *s = b->on_screen < b->nsurfaces ? b->surfaces[b->on_screen] : NULL;
     if (!s) return -1;
@@ -2130,12 +2161,40 @@ int hv_pvg_metal_snapshot(HvPvgMetal *m, uint8_t *bgra, uint32_t w, uint32_t h) 
             } else memcpy(o, p, 3);
             o[3] = 255;
         }
+    const uint8_t *page = hv_pvg_lite_display_page(b->lite);
+    if (page && b->cursor && (b->cursor_shown || page[0xe04])) {
+        uint32_t where = __atomic_load_n((const uint32_t *)(page + 0xe00), __ATOMIC_ACQUIRE);
+        int cx = (int)(where & 0xffff) - b->cursor_hot_x;
+        int cy = (int)(where >> 16) - b->cursor_hot_y;
+        if (where != 0xffffffff) for (uint32_t y=0; y<h; y++) for (uint32_t x=0; x<w; x++) {
+            int px = (uint64_t)x*s->width/w - cx, py = (uint64_t)y*s->height/h - cy;
+            if (px < 0 || py < 0 || px >= (int)b->cursor_w || py >= (int)b->cursor_h) continue;
+            const uint8_t *p = b->cursor + (size_t)py*b->cursor_stride + px*4;
+            uint8_t *o = bgra + ((size_t)y*w+x)*4;
+            for (int c=0; c<3; c++) o[c] = p[c] + (o[c]*(255-p[3])+127)/255;
+        }
+    }
     return 0;
 }
 
+int hv_pvg_metal_snapshot(HvPvgMetal *m, uint8_t *bgra, uint32_t w, uint32_t h) {
+    Backend *b=m;
+    if (!b || !bgra || !w || !h) return -1;
+    pthread_mutex_lock(&b->frame_mu);
+    if (!b->frame) { pthread_mutex_unlock(&b->frame_mu); return -1; }
+    for (uint32_t y=0;y<h;y++) for(uint32_t x=0;x<w;x++)
+        memcpy(bgra+((size_t)y*w+x)*4,b->frame+((size_t)((uint64_t)y*b->frame_h/h)*b->frame_w+(uint64_t)x*b->frame_w/w)*4,4);
+    pthread_mutex_unlock(&b->frame_mu); return 0;
+}
+
 int hv_pvg_metal_frame(HvPvgMetal *m, const uint8_t **pixels, uint32_t *w, uint32_t *h) {
-    (void)m, (void)pixels, (void)w, (void)h;
-    return -1;
+    Backend *b=m;
+    if (!b || !pixels || !w || !h) return -1;
+    wait_idle(b);
+    pthread_mutex_lock(&b->frame_mu);
+    *pixels=b->frame; *w=b->frame_w; *h=b->frame_h;
+    int result=b->frame ? 0 : -1;
+    pthread_mutex_unlock(&b->frame_mu); return result;
 }
 
 /* Instant resume. Buffers and surfaces are in guest memory after every exec; private textures are not (to do). */

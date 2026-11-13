@@ -1,6 +1,6 @@
 # libmenhir.so: the app's native side. Built by Gradle (android/app/build.gradle.kts, externalNativeBuild).
 cmake_minimum_required(VERSION 3.22)
-project(menhir_native C)
+project(menhir_native C CXX)
 set(CMAKE_C_STANDARD 11)
 
 get_filename_component(ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
@@ -21,8 +21,7 @@ if(MENHIR_FAKE_ENGINE)
   target_sources(menhir PRIVATE fake_vm.c)
   target_compile_definitions(menhir PRIVATE MENHIR_FAKE_ENGINE)
 else()
-  # The real engine: android/engine builds libmenhir-engine.a (core, devices with pvg_null.c until the
-  # Vulkan backend lands, disks, snapshots) and adds android/deps for the services. EXCLUDE_FROM_ALL:
+  # The real engine and services. EXCLUDE_FROM_ALL:
   # only what libmenhir.so links is built, not the engine's tests and command-line tool.
   set(MENHIR_WITH_NET ON CACHE BOOL "" FORCE)
   set(MENHIR_WITH_RESTORE ON CACHE BOOL "" FORCE)
@@ -32,8 +31,13 @@ else()
   target_sources(menhir PRIVATE henge-vm.c vm_android.c)
   target_compile_options(menhir PRIVATE -ffixed-x18)
   target_link_libraries(menhir PRIVATE menhir-engine menhir::net menhir::restore menhir::audio menhir::compat)
-  # When android/gfx exists, link its target here as well (it provides hv_pvg_metal_* for Vulkan, in
-  # place of the engine's pvg_null.c).
+  # Replace the headless backend only in this real-app build.
+  get_target_property(engine_sources menhir-engine SOURCES)
+  list(FILTER engine_sources EXCLUDE REGEX "/pvg_null[.]c$")
+  set_property(TARGET menhir-engine PROPERTY SOURCES "${engine_sources}")
+  add_subdirectory(${ROOT}/android/gfx ${CMAKE_BINARY_DIR}/gfx EXCLUDE_FROM_ALL)
+  target_link_libraries(menhir-engine PUBLIC menhir_gfx)
+  set_target_properties(menhir PROPERTIES LINKER_LANGUAGE CXX)
 endif()
 
 if(MENHIR_FAKE_FETCH)

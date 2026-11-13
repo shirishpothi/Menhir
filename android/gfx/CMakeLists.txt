@@ -13,12 +13,14 @@ add_library(menhir_gfx STATIC
   ${ROOT}/devices/pvg_vulkan.c ${ROOT}/devices/pvg_vulkan_desc.c
   ${ROOT}/devices/air/air_library.c ${ROOT}/devices/air/air_spirv.c
   ${ROOT}/devices/air/ntv/nir_to_spirv.c ${ROOT}/devices/air/ntv/spirv_builder.c ${AIR_SOURCES})
+set_target_properties(menhir_gfx PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_compile_features(menhir_gfx PRIVATE c_std_11)
 target_compile_definitions(menhir_gfx PRIVATE
   __STDC_CONSTANT_MACROS
   __STDC_FORMAT_MACROS
   __STDC_LIMIT_MACROS
   HAVE_PTHREAD
+  HAVE_LINUX_FUTEX_H
   HAVE___BUILTIN_CLZ
   HAVE___BUILTIN_CLZLL
   HAVE___BUILTIN_CTZ
@@ -60,9 +62,21 @@ if(NOT LLVM_LIBS)
   message(FATAL_ERROR "Run android/gfx/llvm/build.sh and android/gfx/mesa/build.sh android first")
 endif()
 target_link_libraries(menhir_gfx PUBLIC "-Wl,--start-group" ${MESA_LIBS} ${LLVM_LIBS}
-  "-Wl,--end-group" vulkan android log z m)
+  "-Wl,--end-group" c++_static c++abi vulkan android log z m)
 add_executable(pvg_replay_vulkan replay/pvg_replay.c ${ROOT}/devices/pvg_lite.c ${ROOT}/devices/pvg_vulkan_capture.c)
 target_include_directories(pvg_replay_vulkan PRIVATE ${ROOT}/core ${ROOT}/host ${ROOT}/devices)
 target_link_libraries(pvg_replay_vulkan PRIVATE menhir_gfx)
 set_target_properties(pvg_replay_vulkan PROPERTIES LINKER_LANGUAGE CXX)
 target_link_options(pvg_replay_vulkan PRIVATE -Wl,--gc-sections -static-libstdc++)
+
+# Shell-only real-window replay. No APK, guest or app data is needed.
+option(MENHIR_GFX_WINDOW_TEST "Build app_process window replay diagnostic" OFF)
+if(MENHIR_GFX_WINDOW_TEST)
+  add_library(pvg_replay_window SHARED window/replay_window.c replay/pvg_replay.c
+    ${ROOT}/devices/pvg_lite.c ${ROOT}/devices/pvg_vulkan_capture.c)
+  target_compile_definitions(pvg_replay_window PRIVATE main=pvg_replay_main MENHIR_GFX_WINDOW_TEST)
+  target_include_directories(pvg_replay_window PRIVATE ${ROOT}/core ${ROOT}/host ${ROOT}/devices)
+  target_link_libraries(pvg_replay_window PRIVATE menhir_gfx)
+  set_target_properties(pvg_replay_window PROPERTIES LINKER_LANGUAGE CXX)
+  target_link_options(pvg_replay_window PRIVATE -Wl,--gc-sections -static-libstdc++)
+endif()
