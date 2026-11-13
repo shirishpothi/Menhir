@@ -11,19 +11,26 @@ GPL-2.0-or-later, as is Menhir.
 
 ## Target device
 
-OPPO Pad 3 Pro, as far as we know: Snapdragon 8 Gen 3, Adreno 750, 12.1 inch 2800 x 2000
-panel, 12 or 16 GB RAM, ColorOS on Android 15 or later, not rooted. **This is unverified.**
-The tablet has not been connected to this Mac yet. When it is, read the real values with
-`adb shell getprop`, `/proc/cpuinfo`, `getconf PAGE_SIZE` and `dumpsys display`, then correct
-this section. Until then, do not hard-code anything that depends on these numbers.
+OPPO Pad 3 Pro (`OPD2402`), read from the tablet over adb on 2026-11-13:
 
-Consequences that hold either way:
+- Snapdragon 8 Gen 3 (`SM8650`): 1 Cortex-X4, 5 Cortex-A720, 2 Cortex-A520. Adreno 750.
+- `/proc/cpuinfo` features: `fp asimd aes pmull sha1 sha2 crc32 atomics fphp asimdhp
+  asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 asimdfhm dit uscat ilrcpc
+  flagm sb paca pacg dcpodp flagm2 frint i8mm bf16 dgh bti ecv afp`. No SVE, SVE2 or SME.
+- Android 16 (SDK 36), ColorOS build `OPD2402_16.0.5.1301`, not rooted.
+- 4 KB pages. 12 GB RAM (11.8 GB visible). About 170 GB free on `/data`.
+- Panel 3000 x 2120 in landscape, 420 dpi, running at 120 Hz.
+- No `/dev/kvm`; `/dev/gunyah` exists but protected VMs are not supported.
+- It connects by wireless debugging, so its adb serial is an mDNS name
+  (`adb devices`); always pass `adb -s`.
+
+Consequences:
 
 - Host and guest are both arm64, so Henge's arm64-to-arm64 JIT is the right engine. Android
   gives apps no hypervisor on Snapdragon, the same constraint Henge has on iOS.
 - Android apps may map memory writable and executable, so none of Henge's iOS JIT bootstrap
   (StikJIT, pairing, debugger tricks) is needed. Do not port `ios/Henge/JIT/`.
-- The host kernel probably uses 4 KB pages; the guest uses 16 KB. Henge assumes both are 16 KB.
+- The host kernel uses 4 KB pages; the guest uses 16 KB. Upstream Henge assumes both are 16 KB.
 - There is no Metal. The guest's paravirtual GPU commands must be replayed with Vulkan.
 - bionic uses `TPIDR_EL0` for its own thread pointer and reserves `x18`.
 
@@ -61,7 +68,7 @@ that works and name it in your final report so the merge is easy.
   an `android-36;google_apis;arm64-v8a` emulator image, JDK 17, Xcode 26.3. ABI is
   `arm64-v8a` only. `minSdk` 34.
 - This Mac is an M3 with 16 GB, so the Android emulator runs arm64 code natively. It is the
-  test device until the tablet is connected. Other agents share the machine: name your AVD
+  test device when the tablet is not connected. Other agents share the machine: name your AVD
   after your area, run one emulator at most, and shut it down when you finish
   (`adb emu kill`, `./gradlew --stop`, no stray `qemu-system-*`, `netsimd` or `java`).
 - Shell is zsh with BSD tools; GNU ones are `g`-prefixed. Quote globs.
