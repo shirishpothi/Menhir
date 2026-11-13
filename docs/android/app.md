@@ -208,8 +208,12 @@ What was run and what it showed, as of 2026-11-13:
   `hv_audio_attach`, `menhir_fetch_ipsw`, `hv_pvg_metal_submit`, `hv_jit_signals_install` and
   `hv_snapshot_save`. It has not been run.
 - On the tablet, the fake build installed and launched: logcat showed "Menhir started; fake
-  engine: true", with storage in `/storage/emulated/0/Android/data/app.menhir/files`. The
-  tablet was in use for a game at the time, so nothing more was run on it.
+  engine: true", with storage in `/storage/emulated/0/Android/data/app.menhir/files`. A
+  uiautomator dump showed the Macs screen in landscape, with its content at
+  `[0,0][3000,2120]`, the whole panel. `dumpsys display` gives the panel as 2120 x 3000 in
+  portrait at xdpi 304.2 and ydpi 304.8, so the session's mode works out to 3000 x 2120 and
+  250 x 177 mm. The tablet was in use, and then locked, so New Mac and the session were not
+  run on it.
 - The emulator system image was missing from the SDK during this work, so nothing ran on an
   emulator either.
 
