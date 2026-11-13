@@ -67,7 +67,13 @@ static void drain_responses(HvVirtioUsb *d) {
     HvVirtio *v = &d->vio;
     static HvVirtqElem e;
     int any = 0;
-    while (hv_virtq_pop(v, RSPQ, &e) > 0) {
+    for (;;) {
+        /* Leave a response in the guest's queue while the host ring is full;
+           hv_vusb_recv wakes the machine to retry once it makes room. */
+        pthread_mutex_lock(&d->mu);
+        int full = d->in_tail - d->in_head >= HV_VUSB_RING;
+        pthread_mutex_unlock(&d->mu);
+        if (full || hv_virtq_pop(v, RSPQ, &e) <= 0) break;
         uint32_t total = 0;
         for (int s = 0; s < e.nseg; s++)
             if (!e.seg[s].write) total += e.seg[s].len;
@@ -221,8 +227,10 @@ int hv_vusb_recv(HvVirtioUsb *d, uint8_t ep, HvVusbMsg *out, int timeout_ms) {
             if (ep == 0xff || m->ep == ep || m->type == HV_VUSB_RSP_RESET) {
                 *out = *m;
                 for (uint32_t j = i; j != d->in_head; j--) d->in[j % HV_VUSB_RING] = d->in[(j - 1) % HV_VUSB_RING];
+                int was_full = d->in_tail - d->in_head >= HV_VUSB_RING;
                 d->in_head++;
                 pthread_mutex_unlock(&d->mu);
+                if (was_full) hv_machine_wake(d->vio.m);
                 return 1;
             }
         }

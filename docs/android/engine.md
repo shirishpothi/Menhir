@@ -322,3 +322,16 @@ The context violation is reproduced and fixed; whether it explains the full
 Cryptex stall still requires the confirming restore. The unfixed blank-disk
 baseline was stopped after 394.410 seconds during main-image upload. A first
 fixed startup smoke run was stopped after 56.830 seconds for final review.
+
+The original log supports the context race. The guest first logged
+`Expected 53023 received 53024`, then `Expected 53024 received 53025`: packet
+53023 arrived after 53024, so the host reordered mux packets. usbmux does not
+retransmit, so the dropped packet ended the stream. A single endpoint worker
+keeps submission order. The reordering therefore came from two threads assigning
+sequence numbers and submitting packets concurrently, which the context fix
+prevents.
+
+Separately, a full 256-entry response ring used to drop guest responses after
+returning their buffers. The device now leaves responses in the guest queue
+until the host takes one, then wakes the machine to retry. No tablet log shows
+this drop, so it is hardening rather than the identified cause.
