@@ -1449,6 +1449,10 @@ static int translate_msr_inline(Emit *e, uint32_t insn, uint64_t pc) {
 #define COMMPAGE_TIMEBASE_OFFSET 0xfffffc088ull
 #define COMMPAGE_TIMEBASE_TYPE   0xfffffc090ull
 static int translate_counter(Emit *e, uint32_t insn, uint64_t pc, int physical) {
+#if !defined(__APPLE__)
+    (void)e; (void)insn; (void)pc; (void)physical;
+    return 0; /* Use the scaled 24 MHz counter through hv_sysreg_read. */
+#else
     static int type = -1;
     if (type < 0) type = *(volatile uint8_t *)(uintptr_t)COMMPAGE_TIMEBASE_TYPE;
     if (type == 0) return 0; /* the kernel's own path: leave it to the helper */
@@ -1474,6 +1478,7 @@ static int translate_counter(Emit *e, uint32_t insn, uint64_t pc, int physical) 
     if (r != rt) put(e, STR_X(r, 28, slot_of(rt)));
     if (el0) e->ool[slow].join = e->n;
     return 1;
+#endif
 }
 
 static int translate_sysreg_inline(Emit *e, uint32_t insn, uint64_t pc) {

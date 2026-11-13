@@ -1,6 +1,6 @@
 #include "sysreg.h"
 
-#include <mach/mach_time.h>
+#include "platform.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -27,7 +27,7 @@
 #define CNTFRQ       24000000ull
 
 static uint64_t counter(void) {
-    return mach_absolute_time(); /* 24 MHz on Apple silicon */
+    return hv_host_counter(); /* 24 MHz on Apple silicon */
 }
 
 uint64_t hv_counter(void) {
@@ -203,7 +203,7 @@ static int write_reg(HvCpu *cpu, uint32_t reg, uint64_t v) {
     case R(3, 0, 2, 0, 0): { /* a process switch */
         uint64_t old = cpu->ttbr0_el1;
         cpu->ttbr0_el1 = v;
-        if (old != v) cpu->ttbr0_changed_at = mach_absolute_time();
+        if (old != v) cpu->ttbr0_changed_at = hv_host_counter();
         hv_tlb_switch_user(cpu, old, v);
         hv_ijc_switch(cpu);
         return 0;
@@ -389,7 +389,7 @@ void hv_tlbi_apply(HvCpu *cpu, uint32_t op1, uint32_t crn, uint32_t crm, uint32_
         if (cpu->m->log >= 2)
             fprintf(stderr, "tlbi-all S1_%u_C%u_C%u_%u pc %llx\n", op1, crn, crm, op2, (unsigned long long)pc);
         cpu->m->stats.flush_why[crm == 7 ? 0 : 1]++;
-        uint64_t since_switch = crm == 7 ? mach_absolute_time() - cpu->ttbr0_changed_at : ~0ull; /* 24 MHz ticks */
+        uint64_t since_switch = crm == 7 ? hv_host_counter() - cpu->ttbr0_changed_at : ~0ull; /* 24 MHz ticks */
         /* HV_SWITCH_FLUSH=1 (testing): macOS 27's xnu follows a process switch between two shared regions with a
            local TLBI VMALLE1, to drop the old region's global entries. Here every process's user entries are put
            aside under its own TTBR0 and its cached branch targets under its own ASID, so nothing of the old one

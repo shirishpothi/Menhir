@@ -206,7 +206,7 @@ test-tl-glue: $(B)/test_tl_glue $(B)/tl-exit3
 
 # The restore stack, built from the same sources and with the same stand-ins as iOS.
 $(B)/mac-restore/libhengerestore.a: tools/build_ios_restore.sh host/libusb_shim.c host/install.c host/curl_shim.m $(wildcard third_party/*/src/*.c) $(wildcard third_party/libirecovery/src/*.c)
-	nice -n 10 tools/build_ios_restore.sh mac
+	HENGE_RESTORE_BUILD="$(abspath $(B)/mac-restore)" nice -n 10 tools/build_ios_restore.sh mac
 
 # The installer: libirecovery, usbmuxd and idevicerestore (third_party, vendored
 # sources) linked against host/libusb_shim.c, so they restore the virtual Mac

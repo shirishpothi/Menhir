@@ -2,6 +2,9 @@
 #include <errno.h>
 #include "../core/machine.h"
 #include "disk.h"
+#if defined(__ANDROID__)
+#include "compat_android.h"
+#endif
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -27,6 +30,7 @@ int hv_disk_open(HvDisk *d, const char *path, uint64_t offset, int readonly) {
        gigabytes of dirty pages; reads stay cached, and the kernel keeps the two coherent. Off by default:
        on the Mac bench big writes took 2-3x as long that way (2 GB + sync 4-6 s -> 9-17 s) and everyday
        work was no faster. The phone's installer turns it on for the restore, which writes ~15 GB at once. */
+#if defined(__APPLE__)
     const char *wc = getenv("HV_WRITE_CACHE");
     if (!readonly && wc && !atoi(wc)) {
         d->wfd = open(path, O_RDWR);
@@ -35,6 +39,7 @@ int hv_disk_open(HvDisk *d, const char *path, uint64_t offset, int readonly) {
             d->wfd = -1;
         }
     }
+#endif
     return 0;
 }
 
@@ -80,7 +85,11 @@ int hv_disk_flush(HvDisk *d) {
     if (d->readonly) return 0;
     switch (hv_knob[HV_K_FLUSH]) {
     case 1: return 0;
+#if defined(__APPLE__)
     case 2: return fcntl(d->fd, F_BARRIERFSYNC) == -1 ? -1 : 0;
+#else
+    case 2: return menhir_disk_sync(d->fd);
+#endif
     default: return fsync(d->fd);
     }
 }

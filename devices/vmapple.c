@@ -3,11 +3,15 @@
 #include "sysreg.h"
 
 #include <errno.h>
+#if defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/mach_error.h>
 #include <mach/vm_map.h>
+#endif
 #include <pthread.h>
+#if defined(__APPLE__)
 #include <pthread/qos.h>
+#endif
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -169,6 +173,7 @@ static void gic_msi_write(void *opaque, uint64_t off, uint64_t v, unsigned size)
    pages out of this process's footprint. It allows that once a debugger has
    been attached, which is how an iOS app gets to use JIT at all. Returns NULL
    if it is refused. In pieces, as one memory entry has a size limit. */
+#if defined(__APPLE__)
 extern kern_return_t mach_memory_entry_ownership(mach_port_t entry, task_t owner, int ledger_tag, int ledger_flags);
 
 static uint8_t *alloc_no_footprint(uint64_t size) {
@@ -196,6 +201,10 @@ static uint8_t *alloc_no_footprint(uint64_t size) {
     return (uint8_t *)base;
 }
 
+#else
+static uint8_t *alloc_no_footprint(uint64_t size) { (void)size; return NULL; }
+#endif
+
 /* A mapped file's page is slow to touch the first time and as fast as any other
    afterwards, so a background thread gets there before the guest does. Adding
    zero dirties the page without changing it, whatever the guest has written. */
@@ -210,7 +219,9 @@ struct PrefaultArgs {
 static void *prefault_thread(void *arg) {
     struct PrefaultArgs a = *(struct PrefaultArgs *)arg;
     free(arg);
+#if defined(__APPLE__)
     pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#endif
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     for (uint64_t off = 0; off < a.size; off += 0x4000) __atomic_fetch_add((volatile uint64_t *)(a.ram + off), 0, __ATOMIC_RELAXED);

@@ -1,7 +1,6 @@
 #include "machine.h"
 
-#include <mach/mach.h>
-#include <mach/mach_time.h>
+#include "platform.h"
 #include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -47,6 +46,7 @@ int hv_knob_set(HvMachine *m, const char *name, int value) {
 }
 
 int hv_machine_init(HvMachine *m, size_t jit_bytes) {
+    if (hv_host_check()) return -1;
     memset(m, 0, sizeof *m);
     if (hv_jit_region_open(&m->jit, jit_bytes) != 0) return -1;
     return init_rest(m);
@@ -54,6 +54,7 @@ int hv_machine_init(HvMachine *m, size_t jit_bytes) {
 
 int hv_machine_init_jit(HvMachine *m, void *rx, void *rw, size_t jit_bytes) {
     knobs_init();
+    if (hv_host_check()) return -1;
     memset(m, 0, sizeof *m);
     if (hv_jit_region_attach(&m->jit, rx, rw, jit_bytes) != 0) return -1;
     return init_rest(m);
@@ -136,11 +137,11 @@ __thread HvCpu *hv_self;
 
 void hv_dev_lock(HvMachine *m) {
     if (pthread_mutex_trylock(&m->dev_mu) == 0) return;
-    uint64_t t0 = m->stats_interval ? mach_absolute_time() : 0;
+    uint64_t t0 = m->stats_interval ? hv_host_counter() : 0;
     pthread_mutex_lock(&m->dev_mu);
     if (m->stats_interval) {
         m->stats.dev_waits++;
-        m->stats.dev_wait_ticks += mach_absolute_time() - t0;
+        m->stats.dev_wait_ticks += hv_host_counter() - t0;
     }
 }
 
@@ -190,16 +191,10 @@ uint64_t hv_cpu_post(HvCpu *target, uint32_t flags) {
 /* HV_SYNC_WAIT: a CPU waiting for another's acknowledgement sleeps (after a short spin) instead of
    spinning and yielding, so a host core is free for the CPU it waits on: the phone has two fast cores
    for three guest CPUs, the display and the app. The kernel's compare-and-wait on a 32-bit word. */
-extern int __ulock_wait(uint32_t operation, void *addr, uint64_t value, uint32_t timeout_us);
-extern int __ulock_wake(uint32_t operation, void *addr, uint64_t wake_value);
-#define HV_UL_COMPARE_AND_WAIT 1u
-#define HV_ULF_WAKE_ALL 0x100u
-#define HV_ULF_NO_ERRNO 0x1000000u
-
 /* Wake whoever sleeps on p's ack_seq (it moved, or p stopped using its TLB). */
 static void ack_wake(HvPerCpu *p) {
     if (__atomic_load_n(&p->ack_waiters, __ATOMIC_SEQ_CST))
-        __ulock_wake(HV_UL_COMPARE_AND_WAIT | HV_ULF_WAKE_ALL | HV_ULF_NO_ERRNO, &p->ack_seq, 0);
+        hv_host_wake(&p->ack_seq);
 }
 
 void hv_cpu_ack_wake(HvCpu *cpu) {
@@ -240,7 +235,7 @@ void hv_cpu_process_requests(HvCpu *cpu) {
 void hv_cpu_sync(HvCpu *self, HvCpu *target, uint64_t seq) {
     HvPerCpu *t = target->pc_state, *s = self ? self->pc_state : NULL;
     HvMachine *mm = target->m;
-    uint64_t t0 = mm->stats_interval ? mach_absolute_time() : 0;
+    uint64_t t0 = mm->stats_interval ? hv_host_counter() : 0;
     if (s) {
         __atomic_store_n(&s->tlb_live, 0, __ATOMIC_SEQ_CST); /* others need not wait for this one meanwhile */
         ack_wake(s);
@@ -250,20 +245,28 @@ void hv_cpu_sync(HvCpu *self, HvCpu *target, uint64_t seq) {
     for (uint32_t spins = 0;; spins++) {
         uint64_t ack = __atomic_load_n(&t->ack_seq, __ATOMIC_ACQUIRE);
         if (ack >= seq) break;
-        if (!probed && !(spins & 63) && mach_absolute_time() - t0 >= 2400) { /* 100 us: what is it doing? */
+        if (!probed && !(spins & 63) && hv_host_counter() - t0 >= 2400) { /* 100 us: what is it doing? */
             probed = 1;
+#if defined(__APPLE__)
             thread_basic_info_data_t ti;
             mach_msg_type_number_t cnt = THREAD_BASIC_INFO_COUNT;
             int on = !t->thread || (thread_info(t->thread, THREAD_BASIC_INFO, (thread_info_t)&ti, &cnt) == KERN_SUCCESS && ti.run_state == TH_STATE_RUNNING);
+#else
+            int on = 1; /* Linux scheduler state is not sampled. */
+#endif
             mm->stats.sync_probe[on ? 1 : 0]++;
             if (__atomic_load_n(&t->walk_seq, __ATOMIC_RELAXED) & 1) mm->stats.sync_probe[2]++;
             if (__atomic_load_n(&t->ijc_seq, __ATOMIC_RELAXED) & 1) mm->stats.sync_probe[3]++;
         }
-        if (probed && !probed_long && !(spins & 63) && mach_absolute_time() - t0 >= 24000) { /* 1 ms */
+        if (probed && !probed_long && !(spins & 63) && hv_host_counter() - t0 >= 24000) { /* 1 ms */
             probed_long = 1;
+#if defined(__APPLE__)
             thread_basic_info_data_t ti;
             mach_msg_type_number_t cnt = THREAD_BASIC_INFO_COUNT;
             int on = !t->thread || (thread_info(t->thread, THREAD_BASIC_INFO, (thread_info_t)&ti, &cnt) == KERN_SUCCESS && ti.run_state == TH_STATE_RUNNING);
+#else
+            int on = 1;
+#endif
             mm->stats.sync_phase[on ? __atomic_load_n(&t->phase, __ATOMIC_RELAXED) % 5 : 5]++;
         }
         if (!__atomic_load_n(&t->tlb_live, __ATOMIC_SEQ_CST)) break; /* parked: it does the work before it runs again */
@@ -272,7 +275,7 @@ void hv_cpu_sync(HvCpu *self, HvCpu *target, uint64_t seq) {
             __atomic_add_fetch(&t->ack_waiters, 1, __ATOMIC_SEQ_CST);
             /* Asleep until ack_seq's low word moves or 100 us pass (a missed wake costs no more than that). */
             if (__atomic_load_n(&t->ack_seq, __ATOMIC_SEQ_CST) == ack && __atomic_load_n(&t->tlb_live, __ATOMIC_SEQ_CST))
-                __ulock_wait(HV_UL_COMPARE_AND_WAIT | HV_ULF_NO_ERRNO, &t->ack_seq, (uint32_t)ack, 100);
+                hv_host_wait(&t->ack_seq, (uint32_t)ack);
             __atomic_sub_fetch(&t->ack_waiters, 1, __ATOMIC_SEQ_CST);
         } else if (spins > 200) {
             sched_yield();
@@ -284,7 +287,7 @@ void hv_cpu_sync(HvCpu *self, HvCpu *target, uint64_t seq) {
         __atomic_store_n(&s->phase, HV_PHASE_HELPER, __ATOMIC_RELAXED); /* TLBIs are waited for from a helper */
     }
     if (mm->stats_interval) {
-        uint64_t dt = mach_absolute_time() - t0;
+        uint64_t dt = hv_host_counter() - t0;
         int b = dt < 240 ? 0 : dt < 2400 ? 1 : dt < 24000 ? 2 : 3; /* 24 MHz ticks */
         mm->stats.syncs++;
         mm->stats.sync_ticks += dt;
@@ -383,7 +386,9 @@ void hv_machine_free(HvMachine *m) {
     free(m->blocks);
     for (int i = 0; i < HV_MAX_CPUS; i++) {
         /* hv_run keeps a thread send right for statistics; CPU workers have ended. */
+#if defined(__APPLE__)
         if (m->percpu[i].thread) mach_port_deallocate(mach_task_self(), m->percpu[i].thread);
+#endif
         free(m->percpu[i].ijc);
         free(m->percpu[i].ucode);
         free(m->percpu[i].cid_chunks);

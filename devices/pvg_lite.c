@@ -31,11 +31,23 @@
    Ring entries are {op (1 map, 2 unmap, 3 test), mapping id, result, 0}. */
 
 #include <unistd.h>
+#include <stdlib.h>
+#if defined(__APPLE__)
 #include <CoreFoundation/CoreFoundation.h>
 #include <os/lock.h>
+#else
+#include <pthread.h>
+typedef void *CFTypeRef;
+typedef pthread_mutex_t os_unfair_lock;
+#define OS_UNFAIR_LOCK_INIT ((pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER)
+#define os_unfair_lock_lock pthread_mutex_lock
+#define os_unfair_lock_unlock pthread_mutex_unlock
+#define CFRetain(p) (p)
+#define CFRelease(p) ((void)(p))
+#endif
 #include <stdatomic.h>
 #include "pvg_lite.h"
-#include <mach/mach_time.h>
+#include "platform.h"
 
 int hv_pvg_trace_on(void) {
     static const char *tf;
@@ -43,7 +55,7 @@ int hv_pvg_trace_on(void) {
     static _Atomic uint64_t next;
     if (!read) read = 1, tf = getenv("HV_PVG_TRACE_FILE");
     if (!tf) return 0;
-    uint64_t now = mach_absolute_time();
+    uint64_t now = hv_host_counter();
     if (now >= atomic_load_explicit(&next, memory_order_relaxed)) {
         on = access(tf, F_OK) == 0;
         atomic_store_explicit(&next, now + 2400000, memory_order_relaxed); /* 100 ms of 24 MHz ticks */
@@ -723,7 +735,7 @@ static void vblank(HvPvgLite *p) {
     if (!on || !p->display_pa) return;
     uint8_t *d = hv_phys_ptr(p->m, p->display_pa, 0x4000);
     if (!d || !(__atomic_load_n((uint32_t *)(d + 0x104), __ATOMIC_ACQUIRE) & 8)) return;
-    uint64_t now = mach_absolute_time();
+    uint64_t now = hv_host_counter();
     if (now < next) return;
     next = now + period;
     __atomic_fetch_or((uint32_t *)(d + 0x100), 8, __ATOMIC_RELEASE);

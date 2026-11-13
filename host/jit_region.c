@@ -1,8 +1,10 @@
 #include "jit_region.h"
 
+#if defined(__APPLE__)
 #include <TargetConditionals.h>
 #include <libkern/OSCacheControl.h>
 #include <mach/mach.h>
+#endif
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +14,14 @@
    alias, and the original turned R-X. Works for macOS binaries without the
    hardened runtime; on iOS the executable half has to come from a debugger. */
 static int open_split(HvJitRegion *region, size_t bytes) {
+#if !defined(__APPLE__)
+    void *p = mmap(NULL, bytes, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (p == MAP_FAILED) return -1;
+    region->base = p;
+    region->capacity = bytes / sizeof(uint32_t);
+    region->owned = 1;
+    return 0;
+#else
     void *rx = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (rx == MAP_FAILED) return -1;
     vm_address_t rw = 0;
@@ -25,6 +35,7 @@ static int open_split(HvJitRegion *region, size_t bytes) {
     if (hv_jit_region_attach(region, rx, (void *)rw, bytes) != 0) return -1;
     region->owned = 1;
     return 0;
+#endif
 }
 
 int hv_jit_region_open(HvJitRegion *region, size_t bytes) {
@@ -88,11 +99,18 @@ void hv_jit_finish(HvJitRegion *region, uint32_t *start, size_t words) {
 #if TARGET_OS_OSX
     if (!region->rw_diff) pthread_jit_write_protect_np(1);
 #endif
-    if (start && words) sys_icache_invalidate(start, words * sizeof(uint32_t));
+    if (start && words) {
+#if defined(__APPLE__)
+        sys_icache_invalidate(start, words * sizeof(uint32_t));
+#else
+        __builtin___clear_cache((char *)start, (char *)(start + words));
+#endif
+    }
 }
 
 /* As sys_icache_invalidate does it (libsystem_platform: DSB, IC IVAU per 64-byte line with a DSB after every 20 for
    the CPUs that need one, DSB, ISB), over both ranges. */
+#if defined(__APPLE__)
 static void ic_lines(uint32_t *start, size_t words, int *n) {
     if (!start || !words) return;
     uintptr_t a = (uintptr_t)start & ~(uintptr_t)63, end = (uintptr_t)(start + words);
@@ -102,16 +120,22 @@ static void ic_lines(uint32_t *start, size_t words, int *n) {
     }
 }
 
+#endif
 void hv_jit_finish2(HvJitRegion *region, uint32_t *a, size_t na, uint32_t *b, size_t nb) {
     (void)region;
 #if TARGET_OS_OSX
     if (!region->rw_diff) pthread_jit_write_protect_np(1);
 #endif
+#if !defined(__APPLE__)
+    hv_jit_finish(region, a, na);
+    hv_jit_finish(region, b, nb);
+#else
     int n = 0;
     __asm__ volatile("dsb ish" ::: "memory");
     ic_lines(a, na, &n);
     ic_lines(b, nb, &n);
     __asm__ volatile("dsb ish\n\tisb" ::: "memory");
+#endif
 }
 
 void hv_jit_finish_branch(HvJitRegion *region, uint32_t *word) {
@@ -119,8 +143,12 @@ void hv_jit_finish_branch(HvJitRegion *region, uint32_t *word) {
 #if TARGET_OS_OSX
     if (!region->rw_diff) pthread_jit_write_protect_np(1);
 #endif
+#if !defined(__APPLE__)
+    hv_jit_finish(region, word, 1);
+#else
     /* The store first (so a refetch finds the new word), then the line, with no wait for every CPU's cache. */
     __asm__ volatile("dsb ish\n\tic ivau, %0" ::"r"((uintptr_t)word & ~(uintptr_t)63) : "memory");
+#endif
 }
 
 /* Any thread: an even number of words (blocks stay 8-byte aligned), taken atomically. */

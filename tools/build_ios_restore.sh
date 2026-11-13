@@ -11,7 +11,7 @@ set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TP="$ROOT/third_party"
 if [ "$1" = mac ]; then
-    BUILD="$ROOT/build/mac-restore"
+    BUILD="${HENGE_RESTORE_BUILD:-$ROOT/build/mac-restore}"
     SDKNAME=macosx
     CC=(xcrun --sdk macosx clang -arch arm64 -mmacosx-version-min=14.0)
     CMAKE_TARGET=(-DCMAKE_OSX_DEPLOYMENT_TARGET=14.0)
