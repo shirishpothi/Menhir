@@ -77,8 +77,9 @@ The Android work sits beside Henge's original code:
 | `android/app/`, `android/native/` | Kotlin app and its JNI layer, with a fake engine for UI work |
 | `docs/android/` | Detailed notes: [engine](docs/android/engine.md), [graphics](docs/android/graphics.md), [services](docs/android/services.md), [app](docs/android/app.md) |
 
-The rest of the tree (`core/`, `devices/`, `host/`, `ios/`, `third_party/`) comes from Henge,
-with small changes for the port. See [docs/architecture.md](docs/architecture.md) for how the
+The rest of the tree (`core/`, `devices/`, `host/`, `ios/`, `third_party/`) comes from Henge.
+The port also changed it substantially (about 80 files, mostly in `devices/` and `host/`:
+the Vulkan backend, Android platform code and the USB shim fix). See [docs/architecture.md](docs/architecture.md) for how the
 emulator works.
 
 ## Building
