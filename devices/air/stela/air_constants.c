@@ -1,0 +1,742 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/* Function constants. Metal.jl's library builder (src/metallib/builder.jl)
+ * reads Apple's AIR: each constant is an AS2 global named by
+ * !air.function_constants, which functions load and test with
+ *
+ *   air.is_function_constant_defined(ptr addrspace(2) @storage) -> i1
+ *
+ * Specialization makes the storage an internal constant with its value, so
+ * any remaining access reads constant data, and folds the loads of the whole
+ * value and the tests into constants, so the paths a constant selects
+ * against stay as dead code for NIR to remove. A constant without a value is
+ * zero: Metal requires a value wherever a function reads it untested.
+ *
+ * Program-scope constants derived from function constants are AS2 globals
+ * that air.static_init constructors, listed in llvm.global_ctors, store.
+ * Once the function constants are specialized, LLVM's global optimizer
+ * evaluates the constructors as it does C++ static initializers; it runs on a
+ * clone, so only the values it computes reach the module. A
+ * [[function_constant]] argument's predicate is one of them.
+ *
+ * What the constants then decide is folded, as Metal's compiler folds it: the
+ * paths a false constant disables are removed rather than translated. */
+#define STELA_AIR_METADATA_INTERNAL
+#include "air_constants.h"
+#include "air_calls.h"
+#include "llvm-c/Transforms/PassBuilder.h"
+#include "util/macros.h"
+#include "util/set.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static bool
+fail(struct stela_air_metadata *m, enum stela_air_error_kind kind, const char *detail)
+{
+   if (m->error->kind == STELA_AIR_OK) {
+      m->error->kind = kind;
+      snprintf(m->error->detail, sizeof(m->error->detail), "%s", detail);
+   }
+   return false;
+}
+
+/* Bytes of one lane of a value: one for each bool. */
+static unsigned
+lane_bytes(LLVMTypeRef lane)
+{
+   switch (LLVMGetTypeKind(lane)) {
+   case LLVMIntegerTypeKind: return MAX2(LLVMGetIntTypeWidth(lane) / 8, 1);
+   case LLVMHalfTypeKind: return 2;
+   default: return 4;
+   }
+}
+
+static LLVMValueRef
+lane_constant(LLVMTypeRef lane, const uint8_t *bytes)
+{
+   uint64_t bits = 0;
+   for (unsigned i = 0; i < lane_bytes(lane); i++)
+      bits |= (uint64_t)bytes[i] << (8 * i);
+   LLVMContextRef context = LLVMGetTypeContext(lane);
+   switch (LLVMGetTypeKind(lane)) {
+   case LLVMIntegerTypeKind:
+      return LLVMConstInt(lane, LLVMGetIntTypeWidth(lane) == 1 ? bits != 0 : bits, false);
+   case LLVMHalfTypeKind:
+      return LLVMConstBitCast(LLVMConstInt(LLVMInt16TypeInContext(context), bits, false), lane);
+   default:
+      return LLVMConstBitCast(LLVMConstInt(LLVMInt32TypeInContext(context), bits, false), lane);
+   }
+}
+
+/* The constant of type a value's bytes encode: packed lanes, a three-lane
+ * vector optionally padded to four. NULL when the size disagrees. */
+static LLVMValueRef
+value_constant(LLVMTypeRef type, const struct stela_air_constant_value *value)
+{
+   bool vector = LLVMGetTypeKind(type) == LLVMVectorTypeKind;
+   LLVMTypeRef lane = vector ? LLVMGetElementType(type) : type;
+   unsigned lanes = vector ? LLVMGetVectorSize(type) : 1;
+   size_t stride = lane_bytes(lane);
+   if (value->size != lanes * stride && !(lanes == 3 && value->size == 4 * stride))
+      return NULL;
+   const uint8_t *bytes = value->bytes;
+   if (!vector)
+      return lane_constant(lane, bytes);
+   LLVMValueRef elements[4];
+   for (unsigned i = 0; i < lanes; i++)
+      elements[i] = lane_constant(lane, bytes + i * stride);
+   return LLVMConstVector(elements, lanes);
+}
+
+/* A call of air.is_function_constant_defined on storage. */
+static bool
+defined_test(LLVMValueRef user, LLVMValueRef storage)
+{
+   if (!LLVMIsACallInst(user) || LLVMGetNumArgOperands(user) != 1 ||
+       LLVMGetOperand(user, 0) != storage)
+      return false;
+   LLVMValueRef callee = LLVMGetCalledValue(user);
+   size_t bytes = 0;
+   const char *name = LLVMIsAFunction(callee) ? LLVMGetValueName2(callee, &bytes) : NULL;
+   LLVMTypeRef type = LLVMTypeOf(user);
+   return name && bytes == strlen("air.is_function_constant_defined") &&
+          !memcmp(name, "air.is_function_constant_defined", bytes) &&
+          LLVMGetTypeKind(type) == LLVMIntegerTypeKind && LLVMGetIntTypeWidth(type) == 1;
+}
+
+static void
+specialize(LLVMValueRef storage, LLVMValueRef value, bool defined)
+{
+   for (LLVMUseRef use = LLVMGetFirstUse(storage), next; use; use = next) {
+      next = LLVMGetNextUse(use);
+      LLVMValueRef user = LLVMGetUser(use);
+      LLVMValueRef folded =
+         LLVMIsALoadInst(user) && LLVMTypeOf(user) == LLVMTypeOf(value) &&
+               !LLVMGetVolatile(user) && LLVMGetOrdering(user) == LLVMAtomicOrderingNotAtomic ?
+            value :
+         defined_test(user, storage) ? LLVMConstInt(LLVMTypeOf(user), defined, false) : NULL;
+      if (folded) {
+         LLVMReplaceAllUsesWith(user, folded);
+         LLVMInstructionEraseFromParent(user);
+      }
+   }
+   LLVMSetInitializer(storage, value);
+   LLVMSetGlobalConstant(storage, true);
+   LLVMSetLinkage(storage, LLVMInternalLinkage);
+   LLVMSetExternallyInitialized(storage, false);
+   LLVMSetSection(storage, "");
+}
+
+/* air.normalize_function_constant_predicate.<type>(x), with which a
+ * constructor computes a [[function_constant]] argument's predicate: x as a
+ * bool of its type, 0 or 1. The global optimizer evaluates what replaces it;
+ * another form stays, and the constructor's evaluation refuses it. */
+static void
+normalize_predicates(LLVMModuleRef module)
+{
+   static const char prefix[] = "air.normalize_function_constant_predicate.";
+   LLVMBuilderRef builder = NULL;
+   for (LLVMValueRef fn = LLVMGetFirstFunction(module), next; fn; fn = next) {
+      next = LLVMGetNextFunction(fn);
+      size_t bytes;
+      const char *name = LLVMGetValueName2(fn, &bytes);
+      if (!LLVMIsDeclaration(fn) || bytes < strlen(prefix) || memcmp(name, prefix, strlen(prefix)))
+         continue;
+      if (!builder)
+         builder = LLVMCreateBuilderInContext(LLVMGetModuleContext(module));
+      for (LLVMUseRef use = LLVMGetFirstUse(fn), after; use; use = after) {
+         after = LLVMGetNextUse(use);
+         LLVMValueRef call = LLVMGetUser(use);
+         LLVMTypeRef type = LLVMTypeOf(call);
+         if (!LLVMIsACallInst(call) || LLVMGetCalledValue(call) != fn ||
+             LLVMGetNumArgOperands(call) != 1 || LLVMGetTypeKind(type) != LLVMIntegerTypeKind ||
+             LLVMTypeOf(LLVMGetOperand(call, 0)) != type)
+            continue;
+         LLVMPositionBuilderBefore(builder, call);
+         LLVMValueRef value = LLVMGetOperand(call, 0);
+         LLVMValueRef truth = LLVMBuildICmp(builder, LLVMIntNE, value, LLVMConstNull(type), "");
+         LLVMReplaceAllUsesWith(call, LLVMBuildZExtOrBitCast(builder, truth, type, ""));
+         LLVMInstructionEraseFromParent(call);
+      }
+      if (!LLVMGetFirstUse(fn))
+         LLVMDeleteFunction(fn);
+   }
+   if (builder)
+      LLVMDisposeBuilder(builder);
+}
+
+/* FNV-1a over each value in index order: its index, size and bytes. */
+bool
+stela_air_specialized_name(const char *name, size_t name_bytes,
+                           const struct stela_air_constant_value *values, unsigned count,
+                           char *out, size_t size)
+{
+   uint64_t hash = 0xcbf29ce484222325ull;
+   bool started = false;
+   unsigned last = 0;
+   for (unsigned taken = 0; taken < count; taken++) {
+      const struct stela_air_constant_value *next = NULL;
+      for (unsigned i = 0; i < count; i++) {
+         if ((!started || values[i].index > last) && (!next || values[i].index < next->index))
+            next = &values[i];
+      }
+      if (!next)
+         break;
+      started = true;
+      last = next->index;
+      uint32_t words[2] = {next->index, (uint32_t)next->size};
+      const uint8_t *parts[2] = {(const uint8_t *)words, next->bytes};
+      size_t lengths[2] = {sizeof(words), next->size};
+      for (unsigned part = 0; part < 2; part++) {
+         for (size_t i = 0; i < lengths[part]; i++)
+            hash = (hash ^ parts[part][i]) * 0x100000001b3ull;
+      }
+   }
+   int written = snprintf(out, size, "%.*s.stela.values%016llx", (int)name_bytes, name,
+                          (unsigned long long)hash);
+   return written > 0 && (size_t)written < size;
+}
+
+bool
+stela_air_specialize_constants(struct stela_air_metadata *m,
+                               const struct stela_air_constant_value *values, unsigned count)
+{
+   for (unsigned i = 0; i < count; i++) {
+      for (unsigned j = 0; j < i; j++) {
+         if (values[j].index == values[i].index)
+            return fail(m, STELA_AIR_INPUT, "duplicate function constant value");
+      }
+      if (!values[i].bytes)
+         return fail(m, STELA_AIR_INPUT, "function constant value without bytes");
+   }
+   struct stela_air_function_constant constants[AIR_MAX_FUNCTION_CONSTANTS];
+   LLVMValueRef storage[AIR_MAX_FUNCTION_CONSTANTS];
+   unsigned constant_count;
+   if (!stela_air_metadata_function_constants(m, constants, storage, &constant_count))
+      return false;
+   for (unsigned i = 0; i < constant_count; i++) {
+      const struct stela_air_constant_value *value = NULL;
+      for (unsigned j = 0; j < count && !value; j++)
+         value = values[j].index == constants[i].index ? &values[j] : NULL;
+      if (!value && constants[i].required)
+         return fail(m, STELA_AIR_ARGUMENT, "a required function constant has no value");
+      LLVMTypeRef type = LLVMGlobalGetValueType(storage[i]);
+      LLVMValueRef constant = value ? value_constant(type, value) : LLVMConstNull(type);
+      if (!constant)
+         return fail(m, STELA_AIR_INPUT, "function constant value size disagrees with its type");
+      specialize(storage[i], constant, value != NULL);
+   }
+   LLVMValueRef test = LLVMGetNamedFunction(m->module, "air.is_function_constant_defined");
+   if (test && !LLVMGetFirstUse(test))
+      LLVMDeleteFunction(test);
+   normalize_predicates(m->module);
+   return true;
+}
+
+/* A constant of plain data: no global's address, at any depth. */
+static bool
+plain(LLVMValueRef value, unsigned depth)
+{
+   if (!value || depth > 8 || LLVMIsAGlobalValue(value) || LLVMIsAConstantExpr(value))
+      return false;
+   if (LLVMIsAConstantInt(value) || LLVMIsAConstantFP(value) || LLVMIsAConstantDataSequential(value) ||
+       LLVMIsAConstantAggregateZero(value) || LLVMIsUndef(value))
+      return true;
+   for (int i = 0; i < LLVMGetNumOperands(value); i++) {
+      if (!plain(LLVMGetOperand(value, (unsigned)i), depth + 1))
+         return false;
+   }
+   return LLVMIsAConstantArray(value) || LLVMIsAConstantStruct(value) || LLVMIsAConstantVector(value);
+}
+
+/* AIR's conversions of the clone (air_math.c), as the casts the global
+ * optimizer evaluates. */
+static void
+cast_conversions(LLVMModuleRef clone)
+{
+   static const char prefix[] = "air.convert.";
+   const size_t prefix_bytes = strlen(prefix);
+   LLVMBuilderRef builder = LLVMCreateBuilderInContext(LLVMGetModuleContext(clone));
+   for (LLVMValueRef fn = LLVMGetFirstFunction(clone); fn; fn = LLVMGetNextFunction(fn)) {
+      size_t bytes;
+      const char *name = LLVMGetValueName2(fn, &bytes);
+      if (bytes <= prefix_bytes || memcmp(name, prefix, prefix_bytes))
+         continue;
+      /* <to kind>.<to type>.<from kind>.<from type> */
+      const char *to_type = strchr(name + prefix_bytes, '.');
+      const char *from_kind = to_type ? strchr(to_type + 1, '.') : NULL;
+      if (!from_kind)
+         continue;
+      bool to_signed = name[prefix_bytes] == 's', from_signed = from_kind[1] == 's';
+      for (LLVMUseRef use = LLVMGetFirstUse(fn), next; use; use = next) {
+         next = LLVMGetNextUse(use);
+         LLVMValueRef call = LLVMGetUser(use);
+         if (!LLVMIsACallInst(call) || LLVMGetNumArgOperands(call) != 1)
+            continue;
+         LLVMPositionBuilderBefore(builder, call);
+         LLVMValueRef from = LLVMGetOperand(call, 0);
+         LLVMTypeRef type = LLVMTypeOf(call);
+         LLVMTypeRef to_scalar = LLVMGetTypeKind(type) == LLVMVectorTypeKind ?
+                                    LLVMGetElementType(type) : type;
+         LLVMTypeRef from_type = LLVMTypeOf(from);
+         LLVMTypeRef from_scalar = LLVMGetTypeKind(from_type) == LLVMVectorTypeKind ?
+                                      LLVMGetElementType(from_type) : from_type;
+         bool to_int = LLVMGetTypeKind(to_scalar) == LLVMIntegerTypeKind;
+         bool from_int = LLVMGetTypeKind(from_scalar) == LLVMIntegerTypeKind;
+         /* True converting to a bool, from any nonzero value. */
+         bool to_bool = to_int && LLVMGetIntTypeWidth(to_scalar) == 1;
+         LLVMValueRef zero = LLVMConstNull(from_type), cast;
+         if (to_bool && from_int)
+            cast = LLVMBuildICmp(builder, LLVMIntNE, from, zero, "");
+         else if (to_bool)
+            cast = LLVMBuildFCmp(builder, LLVMRealUNE, from, zero, "");
+         else if (to_int && from_int)
+            cast = LLVMBuildIntCast2(builder, from, type, from_signed, "");
+         else if (to_int)
+            cast = to_signed ? LLVMBuildFPToSI(builder, from, type, "") :
+                               LLVMBuildFPToUI(builder, from, type, "");
+         else if (from_int)
+            cast = from_signed ? LLVMBuildSIToFP(builder, from, type, "") :
+                                 LLVMBuildUIToFP(builder, from, type, "");
+         else
+            cast = LLVMBuildFPCast(builder, from, type, "");
+         LLVMReplaceAllUsesWith(call, cast);
+         LLVMInstructionEraseFromParent(call);
+      }
+   }
+   LLVMDisposeBuilder(builder);
+}
+
+/* Whether the global optimizer left no constructor in the clone. */
+static bool
+constructed(LLVMModuleRef clone)
+{
+   LLVMValueRef list = LLVMGetNamedGlobal(clone, "llvm.global_ctors");
+   LLVMValueRef entries = list ? LLVMGetInitializer(list) : NULL;
+   return !list || (entries && LLVMGetTypeKind(LLVMTypeOf(entries)) == LLVMArrayTypeKind &&
+                    !LLVMGetArrayLength2(LLVMTypeOf(entries)));
+}
+
+void
+stela_air_release_constructed_constants(struct stela_air_constructed_constants *constants)
+{
+   free(constants->globals);
+   *constants = (struct stela_air_constructed_constants){0};
+}
+
+/* Folds each constructor of the specialized clone. The global optimizer's
+ * evaluator refuses any intrinsic call it does not know, even one of
+ * constant operands such as llvm.umin, so fold those to their values first,
+ * as Metal's compiler does. */
+static bool
+fold_constructors(LLVMModuleRef clone, LLVMPassBuilderOptionsRef options)
+{
+   LLVMValueRef constructors = stela_air_metadata_constructors(clone);
+   LLVMValueRef entries = constructors ? LLVMGetInitializer(constructors) : NULL;
+   if (!entries || LLVMGetTypeKind(LLVMTypeOf(entries)) != LLVMArrayTypeKind)
+      return true;
+   uint64_t count = LLVMGetArrayLength2(LLVMTypeOf(entries));
+   for (uint64_t i = 0; i < count; i++) {
+      LLVMValueRef fn = LLVMGetOperand(LLVMGetAggregateElement(entries, (unsigned)i), 1);
+      if (!LLVMIsAFunction(fn) || LLVMIsDeclaration(fn))
+         continue;
+      /* Stela's LLVM (compat/llvm/passes.cpp) has only the pipelines the
+       * compiler names: this is the one folding uses. */
+      LLVMErrorRef error = LLVMRunPassesOnFunction(fn, "sccp,instsimplify,unreachableblockelim,dce",
+                                                   NULL, options);
+      if (error) {
+         LLVMDisposeErrorMessage(LLVMGetErrorMessage(error));
+         return false;
+      }
+   }
+   return true;
+}
+
+/* The clone and original have their globals in the same order. Keep the
+ * constructor's destinations externally visible so LLVM commits their
+ * initializers instead of forwarding their values and removing them. The
+ * arrays are sized to the module's constructed globals; result owns them,
+ * on failure too, until it is released. */
+static bool
+evaluate_constants(LLVMModuleRef original, LLVMModuleRef clone,
+                   struct stela_air_constructed_constants *result)
+{
+   stela_air_release_constructed_constants(result);
+   unsigned count = 0;
+   LLVMValueRef global = LLVMGetFirstGlobal(original);
+   for (LLVMValueRef copy = LLVMGetFirstGlobal(clone); copy && global;
+        copy = LLVMGetNextGlobal(copy), global = LLVMGetNextGlobal(global))
+      count += !LLVMIsGlobalConstant(copy) && stela_air_metadata_constructed(global);
+   LLVMValueRef *storage = malloc(3 * (size_t)MAX2(count, 1) * sizeof(*storage));
+   if (!storage)
+      return false;
+   result->globals = storage;
+   result->values = storage + count;
+   LLVMValueRef *copies = storage + 2 * (size_t)count;
+   global = LLVMGetFirstGlobal(original);
+   for (LLVMValueRef copy = LLVMGetFirstGlobal(clone); copy && global;
+        copy = LLVMGetNextGlobal(copy), global = LLVMGetNextGlobal(global)) {
+      if (LLVMIsGlobalConstant(copy) || !stela_air_metadata_constructed(global))
+         continue;
+      result->globals[result->count] = global;
+      copies[result->count++] = copy;
+      LLVMSetLinkage(copy, LLVMExternalLinkage);
+   }
+   cast_conversions(clone);
+   LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
+   if (!options)
+      return false;
+   if (!fold_constructors(clone, options)) {
+      LLVMDisposePassBuilderOptions(options);
+      return false;
+   }
+   LLVMErrorRef error = LLVMRunPasses(clone, "globalopt", NULL, options);
+   LLVMDisposePassBuilderOptions(options);
+   if (error) {
+      LLVMDisposeErrorMessage(LLVMGetErrorMessage(error));
+      return false;
+   }
+   if (!constructed(clone))
+      return false;
+   for (unsigned i = 0; i < result->count; i++) {
+      result->values[i] = LLVMGetInitializer(copies[i]);
+      if (!plain(result->values[i], 0))
+         return false;
+   }
+   return true;
+}
+
+/* An unassociated constructor whose only reference is its list entry and
+ * whose calls reach only declarations is independent of shader inlining. */
+static bool
+leaf_constructor(LLVMValueRef entry)
+{
+   LLVMValueRef fn = LLVMGetOperand(entry, 1);
+   LLVMUseRef use = LLVMGetFirstUse(fn);
+   if (!LLVMIsAConstantPointerNull(LLVMGetOperand(entry, 2)) ||
+       !use || LLVMGetUser(use) != entry || LLVMGetNextUse(use))
+      return false;
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); block; block = LLVMGetNextBasicBlock(block)) {
+      for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst; inst = LLVMGetNextInstruction(inst)) {
+         if (LLVMIsAInvokeInst(inst) || LLVMIsACallBrInst(inst))
+            return false;
+         if (LLVMIsACallInst(inst)) {
+            LLVMValueRef callee = LLVMGetCalledValue(inst);
+            if (!LLVMIsAFunction(callee) || !LLVMIsDeclaration(callee))
+               return false;
+         }
+      }
+   }
+   return true;
+}
+
+bool
+stela_air_prepare_constants(struct stela_air_metadata *m, const struct stela_air_constants *constants,
+                            struct stela_air_constructed_constants *prepared)
+{
+   LLVMValueRef constructors = stela_air_metadata_constructors(m->module);
+   if (!constructors || !stela_air_has_defined_calls(m->module))
+      return false;
+   LLVMValueRef entries = LLVMGetInitializer(constructors);
+   uint64_t functions = LLVMGetArrayLength2(LLVMTypeOf(entries));
+   if (functions > AIR_MAX_ARGUMENTS)
+      return false;
+   for (unsigned i = 0; i < functions; i++) {
+      if (!leaf_constructor(LLVMGetAggregateElement(entries, i)))
+         return false;
+   }
+   LLVMModuleRef clone = LLVMCloneModule(m->module);
+   if (!clone)
+      return false;
+   struct stela_air_error prior = *m->error;
+   struct stela_air_metadata copy = *m;
+   copy.module = clone;
+   bool ready = stela_air_specialize_constants(&copy, constants->values, constants->count) &&
+                evaluate_constants(m->module, clone, prepared) && m->error->kind == STELA_AIR_OK;
+   LLVMDisposeModule(clone);
+   /* A compact clone that cannot evaluate uses the ordinary path and its diagnostic. */
+   *m->error = prior;
+   return ready;
+}
+
+/* Inlining can change whether a global is used only by AIR logging. Match
+ * the destinations of the post-inline module before using the staged values. */
+static bool
+prepared_matches(LLVMModuleRef module, const struct stela_air_constructed_constants *prepared)
+{
+   unsigned index = 0;
+   for (LLVMValueRef global = LLVMGetFirstGlobal(module); global; global = LLVMGetNextGlobal(global)) {
+      if (!stela_air_metadata_constructed(global))
+         continue;
+      if (index == prepared->count || prepared->globals[index++] != global)
+         return false;
+   }
+   return index == prepared->count;
+}
+
+/* Whether each use of global is a plain load or store of its whole value. */
+static bool
+loaded_and_stored(LLVMValueRef global)
+{
+   for (LLVMUseRef use = LLVMGetFirstUse(global); use; use = LLVMGetNextUse(use)) {
+      LLVMValueRef user = LLVMGetUser(use);
+      bool load = LLVMIsALoadInst(user) && LLVMGetOperand(user, 0) == global;
+      bool store = LLVMIsAStoreInst(user) && LLVMGetOperand(user, 1) == global &&
+                   LLVMGetOperand(user, 0) != global;
+      if ((!load && !store) || LLVMGetVolatile(user) ||
+          LLVMGetOrdering(user) != LLVMAtomicOrderingNotAtomic)
+         return false;
+   }
+   return true;
+}
+
+/* LLVM's global optimizer shrinks a global that only ever holds its
+ * initializer or one other value to an i1, as Apple's compiler leaves a
+ * constructed program-scope constant. The data layout gives an i1 a byte
+ * (i1:8:8) holding 0 or 1: make it that byte, loaded and truncated and
+ * stored zero-extended, as LLVM lowers it, so it is ordinary byte storage.
+ * A global used otherwise stays for validation to refuse. */
+static void
+widen_bool_globals(LLVMModuleRef module)
+{
+   LLVMContextRef context = LLVMGetModuleContext(module);
+   LLVMTypeRef bit = LLVMInt1TypeInContext(context), byte = LLVMInt8TypeInContext(context);
+   LLVMBuilderRef builder = NULL;
+   for (LLVMValueRef global = LLVMGetFirstGlobal(module), next; global; global = next) {
+      next = LLVMGetNextGlobal(global);
+      LLVMValueRef initializer = LLVMGetInitializer(global);
+      if (LLVMGlobalGetValueType(global) != bit || !loaded_and_stored(global) ||
+          (initializer && !LLVMIsUndef(initializer) && !LLVMIsAConstantInt(initializer)))
+         continue;
+      if (!builder && !(builder = LLVMCreateBuilderInContext(context)))
+         return;
+      LLVMValueRef wide = LLVMAddGlobalInAddressSpace(module, byte, "",
+                                                      LLVMGetPointerAddressSpace(LLVMTypeOf(global)));
+      size_t bytes;
+      const char *name = LLVMGetValueName2(global, &bytes);
+      char *kept = strndup(name, bytes);
+      LLVMSetValueName2(global, "", 0);
+      if (kept)
+         LLVMSetValueName2(wide, kept, bytes);
+      free(kept);
+      if (initializer)
+         LLVMSetInitializer(wide, LLVMIsUndef(initializer) ? LLVMGetUndef(byte) :
+                                  LLVMConstInt(byte, LLVMConstIntGetZExtValue(initializer), false));
+      LLVMSetLinkage(wide, LLVMGetLinkage(global));
+      LLVMSetGlobalConstant(wide, LLVMIsGlobalConstant(global));
+      LLVMSetExternallyInitialized(wide, LLVMIsExternallyInitialized(global));
+      LLVMSetThreadLocal(wide, LLVMIsThreadLocal(global));
+      LLVMSetUnnamedAddress(wide, LLVMGetUnnamedAddress(global));
+      LLVMSetAlignment(wide, LLVMGetAlignment(global));
+      const char *section = LLVMGetSection(global);
+      if (section && *section)
+         LLVMSetSection(wide, section);
+      for (LLVMUseRef use = LLVMGetFirstUse(global), after; use; use = after) {
+         after = LLVMGetNextUse(use);
+         LLVMValueRef access = LLVMGetUser(use);
+         LLVMPositionBuilderBefore(builder, access);
+         LLVMValueRef replaced;
+         if (LLVMIsALoadInst(access)) {
+            replaced = LLVMBuildLoad2(builder, byte, wide, "");
+            LLVMSetAlignment(replaced, LLVMGetAlignment(access));
+            LLVMReplaceAllUsesWith(access, LLVMBuildTrunc(builder, replaced, bit, ""));
+         } else {
+            LLVMValueRef value = LLVMBuildZExt(builder, LLVMGetOperand(access, 0), byte, "");
+            replaced = LLVMBuildStore(builder, value, wide);
+            LLVMSetAlignment(replaced, LLVMGetAlignment(access));
+         }
+         LLVMInstructionEraseFromParent(access);
+      }
+      /* Metadata that names the global names its byte. */
+      LLVMReplaceAllUsesWith(global, wide);
+      LLVMDeleteGlobal(global);
+   }
+   if (builder)
+      LLVMDisposeBuilder(builder);
+}
+
+bool
+stela_air_construct_prepared_constants(struct stela_air_metadata *m,
+                                        const struct stela_air_constructed_constants *prepared)
+{
+   LLVMValueRef constructors = stela_air_metadata_constructors(m->module);
+   if (!constructors) {
+      widen_bool_globals(m->module);
+      return true;
+   }
+   LLVMValueRef entries = LLVMGetInitializer(constructors);
+   uint64_t functions = LLVMGetArrayLength2(LLVMTypeOf(entries));
+   if (functions > AIR_MAX_ARGUMENTS)
+      return fail(m, STELA_AIR_LIMIT, "constructor count exceeded");
+   struct stela_air_constructed_constants evaluated = {0};
+   if (!prepared || !prepared_matches(m->module, prepared)) {
+      LLVMModuleRef clone = LLVMCloneModule(m->module);
+      if (!clone)
+         return fail(m, STELA_AIR_ALLOCATION, "module clone allocation failed");
+      bool ready = evaluate_constants(m->module, clone, &evaluated);
+      LLVMDisposeModule(clone);
+      if (!ready) {
+         stela_air_release_constructed_constants(&evaluated);
+         return fail(m, STELA_AIR_INSTRUCTION,
+                     "program-scope constants depend on more than function constants");
+      }
+      prepared = &evaluated;
+   }
+   for (unsigned i = 0; i < prepared->count; i++) {
+      LLVMSetInitializer(prepared->globals[i], prepared->values[i]);
+      LLVMSetGlobalConstant(prepared->globals[i], true);
+   }
+   stela_air_release_constructed_constants(&evaluated);
+   LLVMValueRef dropped[AIR_MAX_ARGUMENTS];
+   for (unsigned i = 0; i < functions; i++)
+      dropped[i] = LLVMGetOperand(LLVMGetAggregateElement(entries, i), 1);
+   LLVMDeleteGlobal(constructors);
+   for (unsigned i = 0; i < functions; i++) {
+      bool listed = false;
+      for (unsigned j = 0; j < i; j++)
+         listed |= dropped[j] == dropped[i];
+      if (!listed && !LLVMGetFirstUse(dropped[i]))
+         LLVMDeleteFunction(dropped[i]);
+   }
+   widen_bool_globals(m->module);
+   return true;
+}
+
+bool
+stela_air_construct_constants(struct stela_air_metadata *m)
+{
+   return stela_air_construct_prepared_constants(m, NULL);
+}
+
+static bool
+fold(struct stela_air_metadata *m, LLVMValueRef fn)
+{
+   LLVMPassBuilderOptionsRef options = LLVMCreatePassBuilderOptions();
+   if (!options)
+      return fail(m, STELA_AIR_ALLOCATION, "LLVM pass options allocation failed");
+   /* SCCP folds the loads of constant data and the branches and selects they
+    * decide, leaving the paths those disable unreachable and what only they
+    * read dead, such as an absent argument's load hoisted out of a branch.
+    * InstSimplify removes a select SCCP decided for a value it cannot name,
+    * such as a function constant's choice of a buffer over a constant.
+    * Unoptimized code also leaves what must be constant computed, such as a
+    * barrier's memory flags. */
+   LLVMErrorRef error = LLVMRunPassesOnFunction(fn, "sccp,instsimplify,unreachableblockelim,dce", NULL, options);
+   LLVMDisposePassBuilderOptions(options);
+   if (error) {
+      LLVMDisposeErrorMessage(LLVMGetErrorMessage(error));
+      return fail(m, STELA_AIR_INSTRUCTION, "function constant folding failed");
+   }
+   return true;
+}
+
+bool
+stela_air_fold_constants(struct stela_air_metadata *m, LLVMValueRef fn)
+{
+   if (!m->unoptimized && !LLVMGetNamedMetadataNumOperands(m->module, "air.function_constants"))
+      return true;
+   return fold(m, fn);
+}
+
+/* Whether pointer is null or off null, whichever way selects and PHIs go. */
+static bool
+null_rooted(LLVMValueRef pointer, unsigned depth)
+{
+   if (LLVMIsAConstantPointerNull(pointer))
+      return true;
+   if (!depth)
+      return false;
+   if (LLVMIsAConstantExpr(pointer))
+      return LLVMGetConstOpcode(pointer) == LLVMGetElementPtr &&
+             null_rooted(LLVMGetOperand(pointer, 0), depth - 1);
+   if (!LLVMIsAInstruction(pointer))
+      return false;
+   switch (LLVMGetInstructionOpcode(pointer)) {
+   case LLVMGetElementPtr:
+   case LLVMBitCast:
+      return null_rooted(LLVMGetOperand(pointer, 0), depth - 1);
+   case LLVMSelect:
+      return null_rooted(LLVMGetOperand(pointer, 1), depth - 1) &&
+             null_rooted(LLVMGetOperand(pointer, 2), depth - 1);
+   case LLVMPHI:
+      for (unsigned i = 0; i < LLVMCountIncoming(pointer); i++) {
+         if (!null_rooted(LLVMGetIncomingValue(pointer, i), depth - 1))
+            return false;
+      }
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool
+accesses_null(LLVMBasicBlockRef block)
+{
+   for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst;
+        inst = LLVMGetNextInstruction(inst)) {
+      LLVMValueRef pointer = LLVMIsALoadInst(inst) ? LLVMGetOperand(inst, 0) :
+                             LLVMIsAStoreInst(inst) ? LLVMGetOperand(inst, 1) : NULL;
+      if (pointer && null_rooted(pointer, 8))
+         return true;
+   }
+   return false;
+}
+
+/* Turns every branch toward a block that must access null, of one that may
+ * not, away from it. An access no branch avoids stays, and reads zero. */
+static bool
+avoid_null(struct stela_air_metadata *m, LLVMValueRef fn, bool *avoided)
+{
+   struct set *undefined = _mesa_pointer_set_create(NULL);
+   if (!undefined)
+      return fail(m, STELA_AIR_ALLOCATION, "null access set allocation failed");
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); block;
+        block = LLVMGetNextBasicBlock(block)) {
+      if (accesses_null(block))
+         _mesa_set_add(undefined, block);
+   }
+   bool grew = undefined->entries != 0;
+   while (grew) {
+      grew = false;
+      for (LLVMBasicBlockRef block = LLVMGetLastBasicBlock(fn); block;
+           block = LLVMGetPreviousBasicBlock(block)) {
+         LLVMValueRef end = LLVMGetBasicBlockTerminator(block);
+         unsigned successors = LLVMGetNumSuccessors(end);
+         bool all = successors && !_mesa_set_search(undefined, block);
+         for (unsigned i = 0; all && i < successors; i++)
+            all = _mesa_set_search(undefined, LLVMGetSuccessor(end, i));
+         if (all) {
+            _mesa_set_add(undefined, block);
+            grew = true;
+         }
+      }
+   }
+   LLVMTypeRef flag = LLVMInt1TypeInContext(LLVMGetModuleContext(m->module));
+   for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(fn); undefined->entries && block;
+        block = LLVMGetNextBasicBlock(block)) {
+      LLVMValueRef end = LLVMGetBasicBlockTerminator(block);
+      if (LLVMGetInstructionOpcode(end) != LLVMCondBr)
+         continue;
+      bool taken = _mesa_set_search(undefined, LLVMGetSuccessor(end, 0));
+      bool otherwise = _mesa_set_search(undefined, LLVMGetSuccessor(end, 1));
+      if (taken != otherwise) {
+         LLVMSetCondition(end, LLVMConstInt(flag, otherwise, false));
+         *avoided = true;
+      }
+   }
+   _mesa_set_destroy(undefined, NULL);
+   return true;
+}
+
+bool
+stela_air_fold_absent(struct stela_air_metadata *m, LLVMValueRef fn,
+                      const struct stela_air_argument *arguments, unsigned count)
+{
+   for (unsigned i = 0; i < count; i++) {
+      LLVMValueRef value = arguments[i].value;
+      if (arguments[i].absent && arguments[i].is_buffer)
+         LLVMReplaceAllUsesWith(value, LLVMConstPointerNull(LLVMTypeOf(value)));
+   }
+   bool avoided = false;
+   return avoid_null(m, fn, &avoided) && (!avoided || fold(m, fn));
+}
