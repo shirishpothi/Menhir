@@ -56,6 +56,10 @@ It survives app updates and can be reached with `adb shell`. Android bind-mounts
 
 ## Macs and install
 
+The Macs screen follows the system's light or dark theme (`Theme.kt`). Macs show as a grid of
+cards (name, macOS version, memory, CPUs, disk, state) with Start or Install macOS, and Delete,
+which asks first. The install's progress, notices and downloaded installers sit in a side pane.
+
 New Mac asks for a name, memory (4, 6 or 8 GB), CPUs, disk size (48 to 128 GB) and a macOS
 version from `Installer.swift`'s list, then installs straight away. The steps are: fetch the
 boot ROM, download the IPSW (it resumes a `.part` file and retries 20 times), make the
@@ -83,8 +87,10 @@ so the image fills the panel with no bars. A density outside 90 to 700 ppi gives
 `surfaceCreated` passes the surface to `henge_vm_set_display_surface`, and `surfaceDestroyed`
 passes NULL before it returns. The surface is destroyed whenever the app leaves the screen.
 
-Four fingers tapped together, or Back, show the controls: Keyboard, Paste, Type the set up
-command, Macs, Stop and Done. Stop asks first. When macOS stops, the reason is shown. A
+Four fingers tapped together, or Back, show the controls, a bar at the top: Keyboard, Paste,
+Type setup command, Macs, Stop and Done. Stop asks first. With the keyboard up, a compact key
+row floats above it: esc, tab, ⌃ ⌥ ⌘ (lit while held for the next key), the arrows and hide.
+Every key is at least 48 dp. The session is always dark. When macOS stops, the reason is shown. A
 restart that macOS asked for starts the Mac again, as on iOS.
 
 ## Input

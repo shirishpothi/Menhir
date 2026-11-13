@@ -1,9 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.Menhir" parent="android:Theme.Material.NoActionBar">
-        <item name="android:windowBackground">@android:color/black</item>
+    <!-- The window behind Compose, matched to MenhirTheme's background so starting doesn't flash. -->
+    <style name="Theme.Menhir" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/window</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
     </style>
-    <style name="Theme.Menhir.Session">
+    <!-- The session is always black, whatever the system theme. -->
+    <style name="Theme.Menhir.Session" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
         <item name="android:windowLayoutInDisplayCutoutMode">always</item>
     </style>
 </resources>

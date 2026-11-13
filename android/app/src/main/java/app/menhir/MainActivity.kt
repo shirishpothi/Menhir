@@ -8,35 +8,59 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -47,21 +71,31 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.delay
 
 /** The Macs, their installs, and the restore images on the tablet. */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
-                Surface(Modifier.fillMaxSize().semantics { testTagsAsResourceId = true }) { Home() }
+            MenhirTheme {
+                Surface(
+                    Modifier.fillMaxSize().semantics { testTagsAsResourceId = true },
+                    color = MaterialTheme.colorScheme.background,
+                ) { Home() }
             }
         }
     }
@@ -70,6 +104,9 @@ class MainActivity : ComponentActivity() {
 fun startSession(context: Context, mac: Mac) {
     context.startActivity(Intent(context, SessionActivity::class.java).putExtra(SessionActivity.MAC_ID, mac.id))
 }
+
+private val MaxContent = 1280.dp
+private val SidePane = 360.dp
 
 @Composable
 private fun Home() {
@@ -101,59 +138,76 @@ private fun Home() {
         val warning = Device.memoryWarning(context, mac.ramMB)
         if (warning != null) memoryWarning = mac to warning else startSession(context, mac)
     }
+    val newMac = { askNotifications(); creating = true }
 
-    Row(Modifier.fillMaxSize().padding(24.dp), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-        Column(Modifier.weight(1.4f)) {
+    Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing), contentAlignment = Alignment.TopCenter) {
+        Column(Modifier.widthIn(max = MaxContent).fillMaxSize().padding(horizontal = Space.xl, vertical = Space.l)) {
+            // Header
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Macs", style = MaterialTheme.typography.headlineMedium, modifier = Modifier.weight(1f))
-                Button(
-                    onClick = { askNotifications(); creating = true },
-                    enabled = !Installer.busy,
-                    modifier = Modifier.testTag("newMac"),
-                ) { Text("New Mac") }
-            }
-            if (Engine.isFake()) {
-                Text(
-                    "Test build: the engine is simulated. Nothing is downloaded and no macOS runs.",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary,
-                )
-            }
-            Spacer(Modifier.padding(6.dp))
-            if (macs.isEmpty()) Text("No Macs yet. Make one with New Mac: it downloads macOS from Apple and installs it.")
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                items(macs, key = { it.id }) { mac ->
-                    MacCard(
-                        mac,
-                        running = sessionMac?.id == mac.id,
-                        canStart = canStart && !Installer.busy,
-                        onStart = { if (sessionMac?.id == mac.id) startSession(context, mac) else start(mac) },
-                        onInstall = { installing = mac },
-                        onDelete = { deleting = mac },
-                    )
-                }
-            }
-        }
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            InstallCard(install)
-            if (!canStart && sessionMac == null && !Installer.busy) {
-                Card {
-                    Column(Modifier.padding(16.dp)) {
-                        Text("The engine runs one Mac each time Menhir starts. Restart Menhir to start a Mac.")
-                        Spacer(Modifier.padding(4.dp))
-                        Button(onClick = { Device.restartApp(context) }, modifier = Modifier.testTag("restart")) { Text("Restart Menhir") }
+                Column(Modifier.weight(1f)) {
+                    Text("Macs", style = MaterialTheme.typography.headlineMedium)
+                    if (Engine.isFake()) {
+                        Text("Test build. The engine is simulated: nothing downloads and macOS does not run.", style = Caption)
                     }
                 }
-            }
-            if (!batteryExempt) {
-                Card {
-                    Column(Modifier.padding(16.dp)) {
-                        Text("Android may stop Menhir in the background, which stops the Mac or the install.")
-                        Spacer(Modifier.padding(4.dp))
-                        OutlinedButton(onClick = { Device.askBatteryExemption(context) }) { Text("Allow background use") }
-                    }
+                if (macs.isNotEmpty()) {
+                    Button(
+                        onClick = newMac,
+                        enabled = !Installer.busy,
+                        modifier = Modifier.heightIn(min = 48.dp).testTag("newMac"),
+                    ) { Text("New Mac") }
                 }
             }
-            Images()
+            Spacer(Modifier.height(Space.l))
+
+            Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(Space.l)) {
+                Box(Modifier.weight(1f).fillMaxHeight()) {
+                    if (macs.isEmpty()) {
+                        EmptyState(enabled = !Installer.busy, onNew = newMac)
+                    } else {
+                        LazyVerticalGrid(
+                            columns = GridCells.Adaptive(minSize = 320.dp),
+                            horizontalArrangement = Arrangement.spacedBy(Space.m),
+                            verticalArrangement = Arrangement.spacedBy(Space.m),
+                            contentPadding = PaddingValues(bottom = Space.l),
+                        ) {
+                            items(macs, key = { it.id }) { mac ->
+                                MacCard(
+                                    mac,
+                                    running = sessionMac?.id == mac.id,
+                                    canStart = canStart && !Installer.busy,
+                                    onStart = { if (sessionMac?.id == mac.id) startSession(context, mac) else start(mac) },
+                                    onInstall = { installing = mac },
+                                    onDelete = { deleting = mac },
+                                )
+                            }
+                        }
+                    }
+                }
+                Column(
+                    Modifier.width(SidePane).fillMaxHeight().verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(Space.m),
+                ) {
+                    InstallCard(install)
+                    if (!canStart && sessionMac == null && !Installer.busy) {
+                        Notice(
+                            "Restart to start a Mac",
+                            "Menhir runs one Mac each time it opens. Restart Menhir to start another.",
+                        ) {
+                            Button(onClick = { Device.restartApp(context) }, modifier = Modifier.testTag("restart")) { Text("Restart Menhir") }
+                        }
+                    }
+                    if (!batteryExempt) {
+                        Notice(
+                            "Background use is limited",
+                            "Android may close Menhir in the background, which stops a running Mac or an install.",
+                        ) {
+                            OutlinedButton(onClick = { Device.askBatteryExemption(context) }) { Text("Allow background use") }
+                        }
+                    }
+                    Images()
+                }
+            }
         }
     }
 
@@ -171,15 +225,21 @@ private fun Home() {
         AlertDialog(
             onDismissRequest = { deleting = null },
             title = { Text("Delete ${mac.name}?") },
-            text = { Text("Its disk and everything on it go. This can't be undone.") },
-            confirmButton = { TextButton(onClick = { Machines.delete(mac); deleting = null }) { Text("Delete") } },
+            text = { Text("This removes its ${mac.diskGB} GB disk and everything on it. You can't undo this.") },
+            confirmButton = {
+                TextButton(
+                    onClick = { Machines.delete(mac); deleting = null },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    modifier = Modifier.testTag("confirmDelete"),
+                ) { Text("Delete") }
+            },
             dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancel") } },
         )
     }
     memoryWarning?.let { (mac, text) ->
         AlertDialog(
             onDismissRequest = { memoryWarning = null },
-            title = { Text("Not much memory free") },
+            title = { Text("Memory is low") },
             text = { Text(text) },
             confirmButton = { TextButton(onClick = { memoryWarning = null; startSession(context, mac) }) { Text("Start anyway") } },
             dismissButton = { TextButton(onClick = { memoryWarning = null }) { Text("Cancel") } },
@@ -188,55 +248,166 @@ private fun Home() {
 }
 
 @Composable
+private fun EmptyState(enabled: Boolean, onNew: () -> Unit) {
+    OutlinedCard(Modifier.fillMaxWidth()) {
+        Column(
+            Modifier.fillMaxWidth().padding(vertical = 64.dp, horizontal = Space.xl),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text("No Macs yet", style = MaterialTheme.typography.titleLarge)
+            Spacer(Modifier.height(Space.s))
+            Text(
+                "Make a Mac to get started. Menhir downloads macOS from Apple and installs it, which takes a while.",
+                style = Caption, textAlign = TextAlign.Center, modifier = Modifier.widthIn(max = 440.dp),
+            )
+            Spacer(Modifier.height(Space.l))
+            Button(onClick = onNew, enabled = enabled, modifier = Modifier.heightIn(min = 48.dp).testTag("newMac")) { Text("New Mac") }
+        }
+    }
+}
+
+private enum class MacState(val label: String) { Running("Running"), Ready("Ready"), NotInstalled("Not installed") }
+
+@Composable
+private fun StateBadge(state: MacState) {
+    val c = MaterialTheme.colorScheme
+    val (bg, fg) = when (state) {
+        MacState.Running -> c.primaryContainer to c.onPrimaryContainer
+        MacState.Ready -> c.secondaryContainer to c.onSecondaryContainer
+        MacState.NotInstalled -> c.surfaceContainerHighest to c.onSurfaceVariant
+    }
+    Row(
+        Modifier.background(bg, CircleShape).padding(horizontal = 10.dp, vertical = Space.xs),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (state == MacState.Running) {
+            Box(Modifier.size(Space.s).background(c.primary, CircleShape))
+            Spacer(Modifier.width(6.dp))
+        }
+        Text(state.label, style = MaterialTheme.typography.labelMedium, color = fg)
+    }
+}
+
+@Composable
 private fun MacCard(mac: Mac, running: Boolean, canStart: Boolean, onStart: () -> Unit, onInstall: () -> Unit, onDelete: () -> Unit) {
-    Card(Modifier.fillMaxWidth()) {
-        Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(mac.name, style = MaterialTheme.typography.titleLarge)
-                val os = if (mac.installed) mac.osName ?: "macOS" else "macOS not installed"
-                Text("$os · ${mac.ramMB / 1024} GB memory · ${mac.cpus} CPUs · ${mac.diskGB} GB disk", style = MaterialTheme.typography.bodyMedium)
-            }
-            if (mac.installed) {
-                Button(onClick = onStart, enabled = running || canStart, modifier = Modifier.testTag("start")) {
-                    Text(if (running) "Open" else "Start")
+    val state = when {
+        running -> MacState.Running
+        mac.installed -> MacState.Ready
+        else -> MacState.NotInstalled
+    }
+    ElevatedCard(Modifier.fillMaxWidth(), colors = CardDefaults.elevatedCardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
+        Column(Modifier.padding(Space.l)) {
+            Row(verticalAlignment = Alignment.Top) {
+                Column(Modifier.weight(1f)) {
+                    Text(mac.name, style = MaterialTheme.typography.titleLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(if (mac.installed) mac.osName ?: "macOS" else "macOS not installed", style = Caption)
                 }
-            } else {
-                Button(onClick = onInstall, enabled = canStart, modifier = Modifier.testTag("install")) { Text("Install macOS") }
+                Spacer(Modifier.width(Space.s))
+                StateBadge(state)
             }
-            Spacer(Modifier.width(8.dp))
-            TextButton(onClick = onDelete, enabled = !running) { Text("Delete") }
+            Spacer(Modifier.height(Space.m))
+            Row(horizontalArrangement = Arrangement.spacedBy(Space.l)) {
+                Spec("${mac.ramMB / 1024} GB", "Memory")
+                Spec("${mac.cpus}", if (mac.cpus == 1) "CPU" else "CPUs")
+                Spec("${mac.diskGB} GB", "Disk")
+            }
+            Spacer(Modifier.height(Space.m))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Spacer(Modifier.height(Space.m))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(
+                    onClick = onDelete,
+                    enabled = !running,
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                    modifier = Modifier.heightIn(min = 48.dp).testTag("delete"),
+                ) { Text("Delete") }
+                Spacer(Modifier.weight(1f))
+                if (mac.installed) {
+                    Button(onClick = onStart, enabled = running || canStart, modifier = Modifier.heightIn(min = 48.dp).testTag("start")) {
+                        Text(if (running) "Open" else "Start")
+                    }
+                } else {
+                    FilledTonalButton(onClick = onInstall, enabled = canStart, modifier = Modifier.heightIn(min = 48.dp).testTag("install")) {
+                        Text("Install macOS")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Spec(value: String, label: String) {
+    Column {
+        Text(value, style = MaterialTheme.typography.titleMedium)
+        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/** A side-pane card: a title, a sentence, and an action. */
+@Composable
+private fun Notice(title: String, text: String, action: @Composable () -> Unit) {
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
+        Column(Modifier.padding(Space.m + Space.xs), verticalArrangement = Arrangement.spacedBy(Space.s)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(text, style = Caption)
+            Box(Modifier.padding(top = Space.xs)) { action() }
         }
     }
 }
 
 @Composable
 private fun InstallCard(s: InstallStatus) {
+    val c = MaterialTheme.colorScheme
     when (s) {
         InstallStatus.Idle -> return
-        is InstallStatus.Working -> Card(Modifier.fillMaxWidth().testTag("installCard")) {
-            Column(Modifier.padding(16.dp)) {
-                Text("Installing macOS on ${s.macName}", style = MaterialTheme.typography.titleMedium)
-                Text(s.phase + if (s.detail.isNotEmpty()) " · ${s.detail}" else "", Modifier.testTag("installPhase"))
-                Spacer(Modifier.padding(4.dp))
+        is InstallStatus.Working -> Card(
+            Modifier.fillMaxWidth().testTag("installCard"),
+            colors = CardDefaults.cardColors(containerColor = c.surfaceContainerHigh),
+        ) {
+            Column(Modifier.padding(Space.m + Space.xs)) {
+                Text("Installing macOS on ${s.macName}", style = Caption)
+                Spacer(Modifier.height(Space.xs))
+                Text(s.phase, style = MaterialTheme.typography.titleMedium, modifier = Modifier.testTag("installPhase"))
+                Spacer(Modifier.height(Space.m))
                 val p = s.progress
-                if (p != null) LinearProgressIndicator(progress = { p.toFloat() }, modifier = Modifier.fillMaxWidth())
-                else LinearProgressIndicator(Modifier.fillMaxWidth())
-                Spacer(Modifier.padding(4.dp))
-                Text("Keep the tablet plugged in. The screen can turn off.", style = MaterialTheme.typography.bodySmall)
-                if (s.downloading) TextButton(onClick = { Installer.cancelDownload() }) { Text("Stop download") }
+                if (p != null) {
+                    LinearProgressIndicator(progress = { p.toFloat() }, modifier = Modifier.fillMaxWidth().height(6.dp))
+                } else {
+                    LinearProgressIndicator(Modifier.fillMaxWidth().height(6.dp))
+                }
+                Spacer(Modifier.height(Space.s))
+                Row {
+                    Text(s.detail, style = Caption, modifier = Modifier.weight(1f))
+                    if (p != null) Text("${(p * 100).toInt()}%", style = MaterialTheme.typography.labelLarge)
+                }
+                Spacer(Modifier.height(Space.m))
+                Text("Keep the tablet plugged in. The screen can turn off.", style = Caption)
+                if (s.downloading) {
+                    Spacer(Modifier.height(Space.s))
+                    OutlinedButton(onClick = { Installer.cancelDownload() }, modifier = Modifier.testTag("stopDownload")) { Text("Stop download") }
+                    Text("The download picks up where it stopped next time.", style = MaterialTheme.typography.labelMedium, color = c.onSurfaceVariant)
+                }
             }
         }
-        is InstallStatus.Done -> Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp)) {
-                Text(s.text, Modifier.testTag("installDone"))
-                TextButton(onClick = { Installer.reset() }) { Text("OK") }
+        is InstallStatus.Done -> Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = c.primaryContainer)) {
+            Column(Modifier.padding(Space.m + Space.xs)) {
+                Text("Install finished", style = MaterialTheme.typography.titleMedium, color = c.onPrimaryContainer)
+                Spacer(Modifier.height(Space.xs))
+                Text(s.text, color = c.onPrimaryContainer, modifier = Modifier.testTag("installDone"))
+                TextButton(onClick = { Installer.reset() }, modifier = Modifier.padding(top = Space.s)) { Text("OK") }
             }
         }
-        is InstallStatus.Failed -> Card(Modifier.fillMaxWidth()) {
-            Column(Modifier.padding(16.dp)) {
-                Text("The install stopped", style = MaterialTheme.typography.titleMedium)
-                Text(s.text)
-                TextButton(onClick = { Installer.reset() }) { Text("OK") }
+        is InstallStatus.Failed -> Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = c.errorContainer)) {
+            Column(Modifier.padding(Space.m + Space.xs)) {
+                Text("The install stopped", style = MaterialTheme.typography.titleMedium, color = c.onErrorContainer)
+                Spacer(Modifier.height(Space.xs))
+                Text(s.text, color = c.onErrorContainer, modifier = Modifier.testTag("installError"))
+                TextButton(
+                    onClick = { Installer.reset() },
+                    colors = ButtonDefaults.textButtonColors(contentColor = c.onErrorContainer),
+                    modifier = Modifier.padding(top = Space.s),
+                ) { Text("OK") }
             }
         }
     }
@@ -248,15 +419,46 @@ private fun Images() {
     val install by Installer.status.collectAsState()
     val present = remember(tick, install) { Release.all.filter { it.downloaded || it.part.exists() } }
     if (present.isEmpty()) return
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp)) {
-            Text("Restore images", style = MaterialTheme.typography.titleMedium)
+    Card(Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)) {
+        Column(Modifier.padding(Space.m + Space.xs)) {
+            Text("Downloaded macOS", style = MaterialTheme.typography.titleMedium)
+            Text("Installers kept on the tablet. Delete them to free space.", style = Caption)
+            Spacer(Modifier.height(Space.s))
             for (r in present) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    val what = if (r.downloaded) bytesText(r.image.length()) else "stopped at ${bytesText(r.part.length())}"
-                    Text("${r.name} · $what", Modifier.weight(1f))
+                Row(Modifier.heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(r.name, style = MaterialTheme.typography.bodyLarge)
+                        val what = if (r.downloaded) bytesText(r.image.length()) else "Partly downloaded, ${bytesText(r.part.length())}"
+                        Text(what, style = Caption)
+                    }
                     TextButton(onClick = { Installer.deleteImage(r); tick++ }, enabled = !Installer.busy) { Text("Delete") }
                 }
+            }
+        }
+    }
+}
+
+/** A large dialog sized for the tablet, with a title, a body and right-aligned actions. */
+@Composable
+private fun SheetDialog(
+    title: String,
+    onDismiss: () -> Unit,
+    maxWidth: androidx.compose.ui.unit.Dp,
+    actions: @Composable () -> Unit,
+    body: @Composable () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(
+            Modifier.widthIn(max = maxWidth).fillMaxWidth(0.9f).padding(vertical = Space.l),
+            shape = MaterialTheme.shapes.extraLarge,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ) {
+            Column(Modifier.padding(Space.l)) {
+                Text(title, style = MaterialTheme.typography.headlineSmall)
+                Spacer(Modifier.height(Space.m))
+                Box(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) { body() }
+                Spacer(Modifier.height(Space.l))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Space.s, Alignment.End)) { actions() }
             }
         }
     }
@@ -273,90 +475,131 @@ private fun NewMacDialog(onDismiss: () -> Unit, onCreate: (Mac, Release, Boolean
     var disk by remember { mutableIntStateOf(64) }
     var release by remember { mutableStateOf(Release.recommended) }
     var keep by remember { mutableStateOf(false) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("New Mac") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    name, { name = it }, label = { Text("Name") }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
-                    modifier = Modifier.testTag("name"),
-                )
-                Choice("Memory", listOf(4, 6, 8), ram, { "$it GB" }) { ram = it }
-                if (ram > total - 4) Text("$ram GB leaves Android little room on this ${total} GB tablet.", style = MaterialTheme.typography.bodySmall)
-                Choice("CPUs", (1..cores).filter { it % 2 == 0 || it == 1 }, cpus, { "$it" }) { cpus = it }
-                Choice("Disk", listOf(48, 64, 96, 128), disk, { "$it GB" }) { disk = it }
-                Text("macOS", style = MaterialTheme.typography.labelLarge)
-                for (r in Release.all) {
-                    Row(
-                        Modifier.fillMaxWidth().selectable(r == release, onClick = { release = r }),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        RadioButton(r == release, onClick = { release = r })
-                        Column {
-                            Text(r.name + if (r.downloaded) " · downloaded" else " · ${bytesText(r.bytes)}")
-                            Text(r.note, style = MaterialTheme.typography.bodySmall)
-                        }
-                    }
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(keep, { keep = it })
-                    Text("Keep the restore image afterwards")
-                }
-                val free = Installer.freeBytes()
-                Text(
-                    "Needs about ${bytesText(Installer.spaceNeeded(release))}; ${bytesText(free)} free.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(
+    val free = remember { Installer.freeBytes() }
+    val needed = Installer.spaceNeeded(release)
+    SheetDialog(
+        title = "New Mac",
+        onDismiss = onDismiss,
+        maxWidth = 920.dp,
+        actions = {
+            TextButton(onClick = onDismiss, modifier = Modifier.heightIn(min = 48.dp)) { Text("Cancel") }
+            Button(
                 onClick = {
                     val mac = Mac(name = name.trim().ifEmpty { "Mac" }, ecid = Machines.newEcid(), ramMB = ram * 1024, cpus = cpus, diskGB = disk)
                     onCreate(mac, release, keep)
                 },
-                modifier = Modifier.testTag("create"),
+                modifier = Modifier.heightIn(min = 48.dp).testTag("create"),
             ) { Text("Create and install") }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(Space.xl)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Space.l)) {
+                OutlinedTextField(
+                    name, { name = it }, label = { Text("Name") }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Words),
+                    modifier = Modifier.fillMaxWidth().testTag("name"),
+                )
+                Column {
+                    Segmented("Memory", listOf(4, 6, 8), ram, { "$it GB" }, tag = "ram") { ram = it }
+                    if (ram > total - 4) {
+                        Text(
+                            "$ram GB leaves Android little room on this $total GB tablet.",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary,
+                            modifier = Modifier.padding(top = Space.s),
+                        )
+                    }
+                }
+                Segmented("CPUs", (1..cores).filter { it % 2 == 0 || it == 1 }, cpus, { "$it" }, tag = "cpus") { cpus = it }
+                Segmented("Disk", listOf(48, 64, 96, 128), disk, { "$it GB" }, tag = "disk") { disk = it }
+            }
+            Column(Modifier.weight(1f)) {
+                ReleasePicker(release, showNotes = true) { release = it }
+                KeepImage(keep) { keep = it }
+                Text(
+                    "Needs about ${bytesText(needed)}. ${bytesText(free)} free.",
+                    style = Caption,
+                    color = if (needed > free) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = Space.s),
+                )
+            }
+        }
+    }
 }
 
 @Composable
 private fun ReleaseDialog(mac: Mac, onDismiss: () -> Unit, onPick: (Release, Boolean) -> Unit) {
     var release by remember { mutableStateOf(Release.all.firstOrNull { it.name == mac.osName } ?: Release.recommended) }
     var keep by remember { mutableStateOf(false) }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Install macOS on ${mac.name}") },
-        text = {
-            Column(Modifier.verticalScroll(rememberScrollState())) {
-                Text("This erases the Mac's disk.")
-                for (r in Release.all) {
-                    Row(Modifier.fillMaxWidth().selectable(r == release, onClick = { release = r }), verticalAlignment = Alignment.CenterVertically) {
-                        RadioButton(r == release, onClick = { release = r })
-                        Text(r.name + if (r.downloaded) " · downloaded" else " · ${bytesText(r.bytes)}")
-                    }
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(keep, { keep = it })
-                    Text("Keep the restore image afterwards")
-                }
-            }
+    SheetDialog(
+        title = "Install macOS on ${mac.name}",
+        onDismiss = onDismiss,
+        maxWidth = 560.dp,
+        actions = {
+            TextButton(onClick = onDismiss, modifier = Modifier.heightIn(min = 48.dp)) { Text("Cancel") }
+            Button(onClick = { onPick(release, keep) }, modifier = Modifier.heightIn(min = 48.dp).testTag("installConfirm")) { Text("Install") }
         },
-        confirmButton = { TextButton(onClick = { onPick(release, keep) }) { Text("Install") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
+    ) {
+        Column {
+            Text("This erases the Mac's disk.", color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(bottom = Space.m))
+            ReleasePicker(release, showNotes = false) { release = it }
+            KeepImage(keep) { keep = it }
+        }
+    }
 }
 
 @Composable
-private fun <T> Choice(label: String, options: List<T>, selected: T, text: (T) -> String, onSelect: (T) -> Unit) {
+private fun ReleasePicker(selected: Release, showNotes: Boolean, onSelect: (Release) -> Unit) {
+    Text("macOS version", style = MaterialTheme.typography.labelLarge)
+    Spacer(Modifier.height(Space.s))
+    Column(Modifier.selectableGroup(), verticalArrangement = Arrangement.spacedBy(Space.s)) {
+        for (r in Release.all) {
+            val on = r == selected
+            OutlinedCard(
+                Modifier.fillMaxWidth().selectable(on, role = Role.RadioButton, onClick = { onSelect(r) }),
+                colors = CardDefaults.outlinedCardColors(
+                    containerColor = if (on) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent,
+                ),
+                border = BorderStroke(1.dp, if (on) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant),
+            ) {
+                Row(Modifier.heightIn(min = 56.dp).padding(end = Space.m), verticalAlignment = Alignment.CenterVertically) {
+                    RadioButton(on, onClick = null, modifier = Modifier.padding(horizontal = Space.m))
+                    Column(Modifier.weight(1f).padding(vertical = Space.s)) {
+                        Text(r.name, style = MaterialTheme.typography.bodyLarge)
+                        if (showNotes && r.note.isNotEmpty()) Text(r.note, style = Caption)
+                    }
+                    Text(if (r.downloaded) "Downloaded" else bytesText(r.bytes), style = Caption)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun KeepImage(keep: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(top = Space.s)
+            .toggleable(keep, role = Role.Checkbox, onValueChange = onChange),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(keep, onCheckedChange = null, modifier = Modifier.padding(end = Space.m))
+        Text("Keep the installer for next time")
+    }
+}
+
+@Composable
+private fun <T> Segmented(label: String, options: List<T>, selected: T, text: (T) -> String, tag: String, onSelect: (T) -> Unit) {
     Column {
         Text(label, style = MaterialTheme.typography.labelLarge)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            for (o in options) FilterChip(selected = o == selected, onClick = { onSelect(o) }, label = { Text(text(o)) })
+        Spacer(Modifier.height(Space.s))
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().testTag(tag)) {
+            options.forEachIndexed { i, o ->
+                SegmentedButton(
+                    selected = o == selected,
+                    onClick = { onSelect(o) },
+                    shape = SegmentedButtonDefaults.itemShape(i, options.size),
+                    modifier = Modifier.heightIn(min = 48.dp),
+                ) { Text(text(o)) }
+            }
         }
     }
 }

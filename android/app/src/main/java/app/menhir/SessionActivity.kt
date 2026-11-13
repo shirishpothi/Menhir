@@ -23,6 +23,18 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.Surface
+import androidx.compose.material3.VerticalDivider
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
@@ -30,11 +42,9 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -118,7 +128,7 @@ class SessionActivity : ComponentActivity() {
         surface.keyHandler = ::onKey
         val overlay = ComposeView(this).apply {
             setContent {
-                MaterialTheme(colorScheme = darkColorScheme()) {
+                MenhirTheme(dark = true) {
                     Box(Modifier.fillMaxSize().semantics { testTagsAsResourceId = true }) { Overlay() }
                 }
             }
@@ -276,31 +286,38 @@ class SessionActivity : ComponentActivity() {
     private fun Overlay() {
         val s = engineState
         when {
-            error != null -> Message("${mac.name} did not start", error ?: "") {
-                if (Engine.canStart()) Button(onClick = { boot() }) { Text("Try again") }
-                TextButton(onClick = { finish() }) { Text("Close") }
+            error != null -> Message("${mac.name} didn't start", error ?: "") {
+                TextButton(onClick = { finish() }, modifier = Modifier.heightIn(min = 48.dp)) { Text("Close") }
+                if (Engine.canStart()) Button(onClick = { boot() }, modifier = Modifier.heightIn(min = 48.dp)) { Text("Try again") }
             }
             s == Engine.STOPPED && Session.mac == null && !starting -> Message("${mac.name} stopped", reason) {
-                Button(onClick = { finish() }, modifier = Modifier.testTag("close")) { Text("Close") }
+                Button(onClick = { finish() }, modifier = Modifier.heightIn(min = 48.dp).testTag("close")) { Text("Close") }
             }
-            s == Engine.CHANGING || starting -> Message("Starting ${mac.name}…", "") {}
+            s == Engine.CHANGING || starting -> Message("Starting ${mac.name}", "", busy = true) {}
         }
         if (controls && s == Engine.RUNNING) Controls()
         if (typing && s == Engine.RUNNING) {
-            Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.ime), contentAlignment = Alignment.BottomCenter) { KeyRow() }
+            Box(
+                Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.ime).padding(bottom = Space.s),
+                contentAlignment = Alignment.BottomCenter,
+            ) { KeyRow() }
         }
         if (confirmStop) {
             AlertDialog(
                 onDismissRequest = { confirmStop = false },
                 title = { Text("Stop ${mac.name}?") },
-                text = { Text("It's like holding a Mac's power button: what isn't saved on the Mac is lost. Shutting down from the Apple menu is safer.") },
+                text = { Text("This is like holding the power button: anything not saved on the Mac is lost. Shutting down from the Apple menu is safer.") },
                 confirmButton = {
-                    TextButton(onClick = {
-                        confirmStop = false
-                        controls = false
-                        InstantResume.discard(mac)
-                        Engine.stop()
-                    }, modifier = Modifier.testTag("confirmStop")) { Text("Stop") }
+                    TextButton(
+                        onClick = {
+                            confirmStop = false
+                            controls = false
+                            InstantResume.discard(mac)
+                            Engine.stop()
+                        },
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                        modifier = Modifier.testTag("confirmStop"),
+                    ) { Text("Stop") }
                 },
                 dismissButton = { TextButton(onClick = { confirmStop = false }) { Text("Cancel") } },
             )
@@ -308,13 +325,23 @@ class SessionActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun Message(title: String, text: String, actions: @Composable () -> Unit) {
-        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Card {
-                Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    private fun Message(title: String, text: String, busy: Boolean = false, actions: @Composable () -> Unit) {
+        Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.4f)), contentAlignment = Alignment.Center) {
+            Surface(
+                Modifier.widthIn(min = 320.dp, max = 480.dp),
+                shape = MaterialTheme.shapes.extraLarge,
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            ) {
+                Column(Modifier.padding(Space.l)) {
                     Text(title, style = MaterialTheme.typography.titleLarge)
-                    if (text.isNotEmpty()) Text(text, Modifier.padding(top = 8.dp).testTag("message"))
-                    Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) { actions() }
+                    if (busy) {
+                        LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = Space.m))
+                    }
+                    if (text.isNotEmpty()) Text(text, style = Caption, modifier = Modifier.padding(top = Space.s).testTag("message"))
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = Space.m),
+                        horizontalArrangement = Arrangement.spacedBy(Space.s, Alignment.End),
+                    ) { actions() }
                 }
             }
         }
@@ -323,60 +350,101 @@ class SessionActivity : ComponentActivity() {
     /** Shown by a four-finger tap or Back. */
     @Composable
     private fun Controls() {
-        Box(Modifier.fillMaxSize().padding(top = 16.dp), contentAlignment = Alignment.TopCenter) {
-            Card {
-                Row(Modifier.padding(8.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
-                    TextButton(onClick = { typing = !typing; showKeyboard(typing); controls = false }, modifier = Modifier.testTag("keyboard")) {
-                        Text(if (typing) "Hide keyboard" else "Keyboard")
-                    }
-                    TextButton(onClick = { controls = false; lifecycleScope.launch { Sharing.paste(this@SessionActivity, EngineInput) } }) { Text("Paste") }
-                    TextButton(onClick = {
+        Box(
+            Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout).padding(top = Space.m),
+            contentAlignment = Alignment.TopCenter,
+        ) {
+            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainerHigh, shadowElevation = 6.dp) {
+                Row(
+                    Modifier.padding(horizontal = Space.s, vertical = Space.xs),
+                    horizontalArrangement = Arrangement.spacedBy(Space.xs),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    BarButton(if (typing) "Hide keyboard" else "Keyboard", "keyboard") { typing = !typing; showKeyboard(typing); controls = false }
+                    BarButton("Paste") { controls = false; lifecycleScope.launch { Sharing.paste(this@SessionActivity, EngineInput) } }
+                    BarButton("Type setup command") {
                         controls = false
                         lifecycleScope.launch { Sharing.typeSlowly(EngineInput, Sharing.SET_UP_COMMAND) }
-                    }) { Text("Type the set up command") }
-                    TextButton(onClick = { startActivity(Intent(this@SessionActivity, MainActivity::class.java)) }) { Text("Macs") }
-                    TextButton(onClick = { confirmStop = true }, modifier = Modifier.testTag("stop")) { Text("Stop") }
-                    TextButton(onClick = { controls = false }) { Text("Done") }
+                    }
+                    BarButton("Macs") { startActivity(Intent(this@SessionActivity, MainActivity::class.java)) }
+                    VerticalDivider(Modifier.height(24.dp).padding(horizontal = Space.xs), color = MaterialTheme.colorScheme.outlineVariant)
+                    BarButton("Stop", "stop", MaterialTheme.colorScheme.error) { confirmStop = true }
+                    Button(onClick = { controls = false }, modifier = Modifier.heightIn(min = 48.dp)) { Text("Done") }
                 }
             }
         }
     }
 
+    @Composable
+    private fun BarButton(label: String, tag: String? = null, color: Color = Color.Unspecified, onClick: () -> Unit) {
+        TextButton(
+            onClick = onClick,
+            colors = if (color == Color.Unspecified) ButtonDefaults.textButtonColors() else ButtonDefaults.textButtonColors(contentColor = color),
+            modifier = Modifier.heightIn(min = 48.dp).then(if (tag != null) Modifier.testTag(tag) else Modifier),
+        ) { Text(label) }
+    }
+
     /** The keys an on-screen keyboard doesn't have, above it. ⌃ ⌥ ⌘ stay down until the next key or click. */
     @Composable
     private fun KeyRow() {
-        Row(
-            Modifier.fillMaxWidth().height(52.dp).background(Color(0xE0202022)).padding(6.dp),
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            color = Color(0xF01C1C1E),
+            shadowElevation = 4.dp,
         ) {
-            HeldKey("esc", LinuxKeys.ESCAPE)
-            HeldKey("tab", LinuxKeys.TAB)
-            StickyKey("⌃", LinuxKeys.CONTROL, "control")
-            StickyKey("⌥", LinuxKeys.OPTION, "option")
-            StickyKey("⌘", LinuxKeys.COMMAND, "command")
-            HeldKey("←", LinuxKeys.LEFT)
-            HeldKey("↑", LinuxKeys.UP)
-            HeldKey("↓", LinuxKeys.DOWN)
-            HeldKey("→", LinuxKeys.RIGHT)
-            KeyCap("hide", Color(0xFF3A3A3C), Modifier.pointerInput(Unit) {
-                detectTapGestures { typing = false; showKeyboard(false) }
-            })
+            Row(
+                Modifier.padding(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                HeldKey("esc", LinuxKeys.ESCAPE)
+                HeldKey("tab", LinuxKeys.TAB)
+                KeyGap()
+                StickyKey("⌃", "control", LinuxKeys.CONTROL)
+                StickyKey("⌥", "option", LinuxKeys.OPTION)
+                StickyKey("⌘", "command", LinuxKeys.COMMAND)
+                KeyGap()
+                HeldKey("←", LinuxKeys.LEFT, KeyNarrow)
+                HeldKey("↑", LinuxKeys.UP, KeyNarrow)
+                HeldKey("↓", LinuxKeys.DOWN, KeyNarrow)
+                HeldKey("→", LinuxKeys.RIGHT, KeyNarrow)
+                KeyGap()
+                KeyCap("hide", null, KeyUp, KeyWide, Modifier.pointerInput(Unit) {
+                    detectTapGestures { typing = false; showKeyboard(false) }
+                }, labelColor = Color(0xFFAEAEB2))
+            }
         }
     }
 
     @Composable
-    private fun androidx.compose.foundation.layout.RowScope.KeyCap(label: String, color: Color, modifier: Modifier, tag: String = label) {
+    private fun KeyGap() = Spacer(Modifier.width(6.dp))
+
+    @Composable
+    private fun KeyCap(
+        label: String,
+        caption: String?,
+        color: Color,
+        width: Dp,
+        modifier: Modifier,
+        tag: String = label,
+        labelColor: Color = Color.White,
+    ) {
         Box(
-            Modifier.weight(1f).fillMaxSize().background(color, RoundedCornerShape(9.dp)).testTag("key-$tag").then(modifier),
+            Modifier.width(width).height(48.dp).background(color, RoundedCornerShape(10.dp)).testTag("key-$tag").then(modifier),
             contentAlignment = Alignment.Center,
-        ) { Text(label, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Color.White) }
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(label, fontSize = if (caption != null) 18.sp else 15.sp, fontWeight = FontWeight.SemiBold, color = labelColor, lineHeight = 18.sp)
+                if (caption != null) Text(caption, fontSize = 10.sp, color = labelColor.copy(alpha = 0.8f), lineHeight = 12.sp)
+            }
+        }
     }
 
     /** Down while touched, up when let go, so holding it repeats as on a Mac. */
     @Composable
-    private fun androidx.compose.foundation.layout.RowScope.HeldKey(label: String, code: Int) {
+    private fun HeldKey(label: String, code: Int, width: Dp = KeyWide) {
         var down by androidx.compose.runtime.remember { mutableStateOf(false) }
-        KeyCap(label, if (down) Color(0xFF0A84FF) else Color(0xFF3A3A3C), Modifier.pointerInput(code) {
+        KeyCap(label, null, if (down) KeyOn else KeyUp, width, Modifier.pointerInput(code) {
             detectTapGestures(onPress = {
                 down = true
                 EngineInput.key(code, true)
@@ -388,11 +456,21 @@ class SessionActivity : ComponentActivity() {
         })
     }
 
+    /** Lit while it is held for the next key. */
     @Composable
-    private fun androidx.compose.foundation.layout.RowScope.StickyKey(label: String, code: Int, tag: String) {
+    private fun StickyKey(symbol: String, name: String, code: Int) {
         val on = code in stickyDown
-        KeyCap(label, if (on) Color(0xFF0A84FF) else Color(0xFF3A3A3C), Modifier.pointerInput(code) {
-            detectTapGestures { sticky.toggle(code) }
-        }, tag)
+        KeyCap(
+            symbol, name, if (on) KeyOn else KeyUp, KeyWide,
+            Modifier.semantics { stateDescription = if (on) "on" else "off" }.pointerInput(code) {
+                detectTapGestures { sticky.toggle(code) }
+            },
+            name,
+        )
     }
 }
+
+private val KeyUp = Color(0xFF3A3A3C)
+private val KeyOn = Color(0xFF0A84FF)
+private val KeyWide = 64.dp
+private val KeyNarrow = 48.dp
