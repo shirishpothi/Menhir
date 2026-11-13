@@ -21,22 +21,27 @@ if(MENHIR_FAKE_ENGINE)
   target_sources(menhir PRIVATE fake_vm.c)
   target_compile_definitions(menhir PRIVATE MENHIR_FAKE_ENGINE)
 else()
-  target_sources(menhir PRIVATE henge-vm.c)
-  # ---- The real engine: add the other areas' targets here ----------------------------------------
-  # android/engine/ (engine), android/gfx/ (Vulkan display: hv_vm_set_display_window), android/deps/
-  # (restore stack, slirp, audio). Each is expected to define the alias target named below.
-  #   add_subdirectory(${ROOT}/android/engine ${CMAKE_BINARY_DIR}/engine)
-  #   add_subdirectory(${ROOT}/android/gfx    ${CMAKE_BINARY_DIR}/gfx)
-  #   add_subdirectory(${ROOT}/android/deps   ${CMAKE_BINARY_DIR}/deps)
-  #   target_link_libraries(menhir PRIVATE menhir::engine menhir::gfx menhir::restore menhir::net menhir::audio)
-  # -----------------------------------------------------------------------------------------------
-  message(FATAL_ERROR "MENHIR_FAKE_ENGINE=OFF needs the engine targets: add them above")
+  # The real engine: android/engine builds libmenhir-engine.a (core, devices with pvg_null.c until the
+  # Vulkan backend lands, disks, snapshots) and adds android/deps for the services. EXCLUDE_FROM_ALL:
+  # only what libmenhir.so links is built, not the engine's tests and command-line tool.
+  set(MENHIR_WITH_NET ON CACHE BOOL "" FORCE)
+  set(MENHIR_WITH_RESTORE ON CACHE BOOL "" FORCE)
+  set(MENHIR_WITH_AUDIO ON CACHE BOOL "" FORCE)
+  add_subdirectory(${ROOT}/android/engine ${CMAKE_BINARY_DIR}/engine EXCLUDE_FROM_ALL)
+  # henge-vm.c is the bridge; vm_android.c is host/vm.c for Android (see its first comment).
+  target_sources(menhir PRIVATE henge-vm.c vm_android.c)
+  target_compile_options(menhir PRIVATE -ffixed-x18)
+  target_link_libraries(menhir PRIVATE menhir-engine menhir::net menhir::restore menhir::audio menhir::compat)
+  # When android/gfx exists, link its target here as well (it provides hv_pvg_metal_* for Vulkan, in
+  # place of the engine's pvg_null.c).
 endif()
 
 if(MENHIR_FAKE_FETCH)
   target_sources(menhir PRIVATE fake_fetch.c)
 else()
-  # host/menhir_fetch.h, implemented by the services agent.
-  #   target_link_libraries(menhir PRIVATE menhir::http)
-  message(FATAL_ERROR "MENHIR_FAKE_FETCH=OFF needs menhir::http: add it above")
+  if(MENHIR_FAKE_ENGINE)
+    set(MENHIR_SERVICES_TESTS OFF CACHE BOOL "" FORCE)
+    add_subdirectory(${ROOT}/android/deps ${CMAKE_BINARY_DIR}/services EXCLUDE_FROM_ALL)
+  endif()
+  target_link_libraries(menhir PRIVATE menhir::http) # host/menhir_fetch.h, from the services
 endif()
