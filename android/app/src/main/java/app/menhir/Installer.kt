@@ -74,6 +74,10 @@ object Installer {
                 run(mac, release, keepImage)
             } catch (e: Exception) {
                 Log.e(TAG, "install failed", e)
+                // A failed install's disk and restore files are of no use; take them off the disk.
+                if (Engine.state() == Engine.RUNNING) Engine.stop()
+                val listed = Machines.get(mac.id)
+                if (listed == null) Machines.removeFiles(mac.directory) else if (!listed.installed) Machines.delete(listed)
                 state.value = InstallStatus.Failed(e.message ?: e.toString())
             } finally {
                 if (lock.isHeld) lock.release()

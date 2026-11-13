@@ -72,7 +72,7 @@ object Machines {
     val all: StateFlow<List<Mac>> = state
 
     fun load() {
-        state.value = try {
+        val loaded = try {
             if (!list.exists()) emptyList() else {
                 val a = JSONArray(list.readText())
                 (0 until a.length()).map { Mac.fromJson(a.getJSONObject(it)) }
@@ -81,6 +81,18 @@ object Machines {
             Log.e(TAG, "the list of Macs could not be read", e)
             emptyList()
         }
+        // load() runs at startup, when no install can be in progress: a Mac whose install did not
+        // finish, and any folder no Mac owns, are leftovers of a failed install, so remove them from disk.
+        val kept = loaded.filter { it.installed }
+        if (kept.size != loaded.size) save(kept)
+        val owned = kept.map { it.id }.toSet()
+        Storage.machines.listFiles()?.filter { it.isDirectory && it.name !in owned }?.forEach { removeFiles(it) }
+        state.value = kept
+    }
+
+    /** Deletes [dir] and everything in it, and logs if anything is left behind. */
+    fun removeFiles(dir: File) {
+        if (!dir.deleteRecursively() && dir.exists()) Log.e(TAG, "could not delete all of ${dir.path}")
     }
 
     fun get(id: String) = state.value.firstOrNull { it.id == id }
@@ -94,7 +106,7 @@ object Machines {
 
     @Synchronized
     fun delete(mac: Mac) {
-        mac.directory.deleteRecursively()
+        removeFiles(mac.directory)
         val next = state.value.filter { it.id != mac.id }
         save(next)
         state.value = next

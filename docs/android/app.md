@@ -64,7 +64,10 @@ It follows the system's light or dark theme (`Theme.kt`) and shows one state at 
   Download and install.
 - **Installing**: the step, its progress, bytes and percent, an estimate of the time left
   while downloading, and Stop download.
-- **Failed**: the reason in plain words and Try again.
+- **Failed**: the reason in plain words and Try again. A failed install's Mac folder (disk,
+  auxiliary storage, restore files) is deleted at once; the downloaded restore image is kept.
+  At startup Menhir also deletes any Mac whose install never finished and any folder under
+  `Machines/` that no Mac owns. Delete Mac removes the Mac's whole folder.
 - **Ready**: the Mac (name, macOS, memory, CPUs, disk used) with Start, or Restart Menhir
   when this process has already run a Mac. More holds Memory and CPUs, Reinstall macOS and
   Delete Mac; the last two ask first.

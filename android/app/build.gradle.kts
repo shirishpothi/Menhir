@@ -18,8 +18,8 @@ android {
         applicationId = "app.menhir"
         minSdk = 34
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.1.2"
+        versionCode = 5
+        versionName = "0.1.3"
         ndk { abiFilters += "arm64-v8a" }
         externalNativeBuild {
             cmake { arguments += "-DMENHIR_FAKE_ENGINE=${if (fakeEngine) "ON" else "OFF"}" }
