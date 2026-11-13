@@ -10,9 +10,9 @@ if [ -z "$serial" ]; then
   [ "$count" = 1 ] || { echo 'Pass an adb serial when multiple devices are attached.' >&2; exit 2; }
   serial=$devices
 fi
-remote=/data/local/tmp/menhir-engine
+remote=/data/local/tmp/menhir/engine-tests
 "$ADB" -s "$serial" shell "mkdir -p $remote"
-trap '"$ADB" -s "$serial" shell "rm -rf /data/local/tmp/menhir-engine" >/dev/null 2>&1 || true' EXIT
+trap '"$ADB" -s "$serial" shell "rm -rf /data/local/tmp/menhir/engine-tests" >/dev/null 2>&1 || true' EXIT
 for t in classify jit_region operands jit mem mmu exc devices shutdown platform; do
   "$ADB" -s "$serial" push "build/test_$t" "$remote/" >/dev/null
   "$ADB" -s "$serial" shell "chmod 700 $remote/test_$t; cd $remote; ulimit -s 65520; export HV_TEST_WORK=$remote; ./test_$t"

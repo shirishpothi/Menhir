@@ -12,7 +12,9 @@
 #include "snapshot.h"
 
 #include <compression.h>
+#if defined(__APPLE__)
 #include <dispatch/dispatch.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -279,9 +281,17 @@ static void chunk_pack(Slot *s, const uint8_t *base, uint64_t size, uint32_t ind
     s->h.index = index;
     size_t host_page = (size_t)getpagesize();
     size_t vec_n = (size_t)(pages * PAGE + host_page - 1) / host_page;
+#if defined(__ANDROID__)
+    unsigned char vec[CHUNK_BYTES / 4096];
+#else
     char vec[CHUNK_BYTES / 4096];
+#endif
     /* Untouched anonymous pages are neither resident nor paged out. A file's page can be written back and dropped, and
        then looks the same while it holds data: file-backed RAM is read whole. */
+#if defined(__ANDROID__)
+    /* Linux mincore cannot distinguish untouched pages from swapped-out data. */
+    use_mincore = 0;
+#endif
     int have_vec = use_mincore && mincore((void *)(base + from), (size_t)pages * PAGE, vec) == 0;
     for (uint32_t i = 0; i < pages; i++) {
         const uint8_t *pg = base + from + (uint64_t)i * PAGE;
@@ -289,7 +299,11 @@ static void chunk_pack(Slot *s, const uint8_t *base, uint64_t size, uint32_t ind
             int touched = 0;
             size_t first = (size_t)(i * PAGE) / host_page, last = (size_t)((i + 1) * PAGE - 1) / host_page;
             for (size_t k = first; k <= last && k < vec_n; k++)
+#if defined(__APPLE__)
                 if (vec[k] & (MINCORE_INCORE | MINCORE_PAGED_OUT)) touched = 1;
+#else
+                if (vec[k] & 1) touched = 1;
+#endif
             if (!touched) continue;
         }
         if (page_zero(pg)) continue;
@@ -313,6 +327,7 @@ static double mono(void) {
 }
 
 /* Chunks are compressed a batch at a time on every core, the next batch while the last one is written. */
+#if defined(__APPLE__)
 static int save_ram(W *w, HvRam *ram, uint64_t *stored_pages, int file_backed) {
     uint32_t nchunks = (uint32_t)((ram->size + CHUNK_BYTES - 1) / CHUNK_BYTES);
     RamHdr rh = {ram->pa, ram->size, CHUNK_PAGES, nchunks};
@@ -387,6 +402,28 @@ static int save_ram(W *w, HvRam *ram, uint64_t *stored_pages, int file_backed) {
     slots_free(set[0], BATCH), slots_free(set[1], BATCH);
     return w->err ? -1 : 0;
 }
+#else
+static int save_ram(W *w, HvRam *ram, uint64_t *stored_pages, int file_backed) {
+    uint32_t n = (uint32_t)((ram->size + CHUNK_BYTES - 1) / CHUNK_BYTES);
+    RamHdr rh = {ram->pa, ram->size, CHUNK_PAGES, n};
+    w_raw(w, &(SecHdr){TAG('R', 'A', 'M', ' '), 0, sizeof rh}, sizeof(SecHdr));
+    w_raw(w, &rh, sizeof rh);
+    Slot slot = {0};
+    if (slots_alloc(&slot, 1)) return w->err = ENOMEM, -1;
+    for (uint32_t i = 0; i < n && !w->err; i++) {
+        double t = mono();
+        chunk_pack(&slot, ram->host, ram->size, i, !file_backed);
+        pack_secs += mono() - t;
+        t = mono();
+        w_raw(w, &slot.h, sizeof slot.h);
+        w_raw(w, slot.h.raw ? slot.stage : slot.out, slot.h.bytes);
+        *stored_pages += slot.h.stored;
+        write_secs += mono() - t;
+    }
+    slots_free(&slot, 1);
+    return w->err ? -1 : 0;
+}
+#endif
 
 static int chunk_unpack(Slot *s, uint8_t *base, uint64_t size) {
     uint64_t from = (uint64_t)s->h.index * CHUNK_BYTES;
@@ -407,6 +444,7 @@ static int chunk_unpack(Slot *s, uint8_t *base, uint64_t size) {
 static double read_secs, unpack_secs; /* for the log: reading, and decompressing alongside */
 
 /* A batch is read while the one before it is decompressed into RAM on the other cores. */
+#if defined(__APPLE__)
 static int load_ram(R *r, HvRam *ram) {
     RamHdr rh;
     if (r_section(r, TAG('R', 'A', 'M', ' '), &rh, sizeof rh)) return -1;
@@ -453,6 +491,28 @@ static int load_ram(R *r, HvRam *ram) {
     if (bad && !r->err) r->err = EINVAL;
     return bad ? -1 : 0;
 }
+#else
+static int load_ram(R *r, HvRam *ram) {
+    RamHdr rh;
+    if (r_section(r, TAG('R', 'A', 'M', ' '), &rh, sizeof rh)) return -1;
+    uint32_t n = (uint32_t)((ram->size + CHUNK_BYTES - 1) / CHUNK_BYTES);
+    if (rh.pa != ram->pa || rh.size != ram->size || rh.chunk_pages != CHUNK_PAGES || rh.nchunks != n)
+        return r->err = EINVAL, -1;
+    Slot slot = {0};
+    if (slots_alloc(&slot, 1)) return r->err = ENOMEM, -1;
+    for (uint32_t i = 0; i < n && !r->err; i++) {
+        double t = mono();
+        if (r_raw(r, &slot.h, sizeof slot.h) || slot.h.index != i || slot.h.bytes > CHUNK_BYTES ||
+            slot.h.stored > CHUNK_PAGES || r_raw(r, slot.out, slot.h.bytes)) { r->err = EINVAL; break; }
+        read_secs += mono() - t;
+        t = mono();
+        if (slot.h.stored && chunk_unpack(&slot, ram->host, ram->size)) r->err = EINVAL;
+        unpack_secs += mono() - t;
+    }
+    slots_free(&slot, 1);
+    return r->err ? -1 : 0;
+}
+#endif
 
 /* ---- devices ---- */
 
@@ -604,7 +664,9 @@ int hv_snapshot_save(const char *path, const char *ident, char *err, size_t errl
     snprintf(tmp, sizeof tmp, "%s.part", path);
     int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (fd < 0) return fail(err, errlen, "Cannot write %s: %s", tmp, strerror(errno));
+#if defined(__APPLE__)
     fcntl(fd, F_NOCACHE, 1);
+#endif
     W w = {.fd = fd, .cap = 4u << 20};
     w.buf = malloc(w.cap);
     if (!w.buf) {
@@ -690,7 +752,9 @@ int hv_snapshot_restore(const char *path, const char *ident, char *err, size_t e
     clock_gettime(CLOCK_MONOTONIC, &t0);
     int fd = open(path, O_RDONLY);
     if (fd < 0) return fail(err, errlen, "No saved Mac: %s", strerror(errno));
+#if defined(__APPLE__)
     fcntl(fd, F_NOCACHE, 1);
+#endif
     SnapHeader h;
     int hr = read_header(fd, &h, ident, NULL);
     if (hr) {

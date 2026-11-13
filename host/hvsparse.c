@@ -1,6 +1,10 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #include "hvsparse.h"
 
 #include <fcntl.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,9 +67,17 @@ int hv_sparse_pack_progress(const char *src, const char *dst, void (*progress)(u
     off_t pos = 0;
     while ((uint64_t)pos < size) {
         off_t data = lseek(in, pos, SEEK_DATA);
-        if (data < 0) break; /* no more data */
+        if (data < 0) {
+            if (errno == ENXIO) break;
+            if (errno != EINVAL && errno != ENOTSUP) goto done;
+            data = pos; /* Filesystems without extent queries: scan for zeros. */
+        }
         off_t hole = lseek(in, data, SEEK_HOLE);
-        if (hole < 0) hole = (off_t)size;
+        if (hole < 0) {
+            if (errno != EINVAL && errno != ENOTSUP) goto done;
+            hole = (off_t)size;
+        }
+        if (hole <= data || (uint64_t)hole > size) goto done;
         for (off_t at = data; at < hole;) {
             size_t n = (size_t)(hole - at < CHUNK ? hole - at : CHUNK);
             if (pread(in, buf, n, at) != (ssize_t)n) goto done;

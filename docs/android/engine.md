@@ -50,22 +50,36 @@ The headless build uses `pvg_null.c`: every valid submitted command retires its
 stamp, but frame and snapshot calls report no image. AES uses the vendored
 mbedTLS implementation on Android, and CommonCrypto on Apple platforms.
 
-`MENHIR_WITH_NET`, `MENHIR_WITH_RESTORE`, and `MENHIR_WITH_AUDIO` default off.
-Enabling them links the services targets from `android/deps`; the small CLI does
-not attach those services. The Kotlin app must attach the services it uses.
-Filesystem flush and balloon hole punching call the services owner's
-`compat_android.c`. The Android library does not compile the Darwin UI/session
-wrapper `host/vm.c`, Mac profiling, or `host/main.c`.
+`MENHIR_WITH_NET`, `MENHIR_WITH_RESTORE`, and `MENHIR_WITH_AUDIO` default on.
+The headless CLI links the real services targets, including the USB host transport,
+Android resolver library, and `menhir::compat`. It attaches networking and audio,
+polls networking on CPU 0, and starts restore with `--install IPSW`. Set
+`HV_NO_NET=1` or `HV_NO_SOUND=1` to disable those services for a reference run.
 
-The CLI accepts `hengevm BOOT_ROM [--installer]`; it creates a single-CPU machine
-with 512 MB RAM and no disks. It installs the Linux signal adapter around the CPU
-run. App callers can use `hv_jit_signals_install/remove` once per process around
-a session, with CPUs stopped before removal. The adapter reads Linux arm64
-`uc_mcontext.pc`, writes a fixed diagnostic for a JIT fault, and calls the prior
-SIGILL/SIGBUS/SIGSEGV handler with the original context. Default dispositions are
-restored so synchronous faults are redelivered. Prior masks, alternate-stack and
-nodefer flags are retained. ART recovery on a live Kotlin session is unverified;
-the CLI test checks chaining to a prior user handler.
+The CLI accepts `--rom`, `--disk`, `--aux`, `--aux-offset`, `--ecid`, `--seed`,
+`--ram` (MiB), `--cpus`, `--log`, `--trace`, `--stats`, `--no-chain`, and
+`--install IPSW`. `--installer` enters DFU without starting restore. The old
+positional ROM argument still works. Disks must already exist. CPU workers have
+8 MiB stacks, alternate signal stacks and blocked asynchronous signals; a 1 ms
+kicker lets chained code return for device work. `HV_VUSB_PROBE=1` performs a
+bounded USB reset and device-descriptor request, then stops the machine.
+
+`menhir-fetch rom DEST` verifies and reuses a cached ROM.
+`menhir-fetch image URL DEST` downloads or resumes the pinned image into
+`DEST.part`, then renames it. It does not print intermediate progress; inspect
+the partial file size while it runs. Both tools are in `android/engine/build/`.
+
+Disk sync and balloon punching already call the Android compatibility helpers.
+Sparse packing now scans data if extent queries are unsupported, and reports
+other seek errors instead of silently treating them as end-of-data. Snapshot
+code compiles on Android with the services LZ4 codec and sequential chunk I/O;
+Mac keeps its dispatch workers. Android reads all anonymous pages because Linux
+mincore cannot distinguish untouched pages from swapped-out data. Snapshot
+save/restore is not wired into this CLI and has not been exercised on Android.
+
+The Linux signal adapter uses arm64 `uc_mcontext.pc` and chains the prior
+SIGILL/SIGBUS/SIGSEGV handler. ART recovery in a live Kotlin session remains
+unverified. The platform test checks chaining to a prior user handler.
 
 ## Page sizes
 
@@ -83,8 +97,8 @@ advice. The prefault worker's 16 KB stride is only a performance hint on 4 KB
 hosts. It does not affect correctness.
 
 The services owner updated snapshot mincore handling to inspect every host page
-within a stored 16 KB guest page. The engine build does not yet include snapshot
-or hvsparse; Android snapshot save/restore remains untested.
+within a stored 16 KB guest page. The engine archive includes snapshot
+and hvsparse; Android snapshot save/restore remains untested.
 
 Tests use host pointers as guest virtual addresses. Their executables disable
 Android heap tags before allocating, because those tags are not guest 48-bit
@@ -138,3 +152,59 @@ On the 16 KB emulator it ran to a clean halt at PC 0x104518 without disks;
 installer mode waited until the 20-second limit. Neither attempt produced serial
 output. A macOS boot, restore, Vulkan rendering, real ART fault recovery and
 physical tablet acceptance are not established by these tests.
+
+## Tablet integration, 2026-11-13
+
+The real device serial was `adb-e8074ab2-kiNpL3._adb-tls-connect._tcp`.
+After enabling all services, all nine upstream suites and the platform suite
+passed on its 4 KiB host pages. Mac `make B=build-engine` and
+`make B=build-engine test` also passed. Existing Mac warnings concern an unused
+profiling variable and Homebrew libraries built for a newer macOS target.
+
+A bare ROM is silent on both hosts. With blank storage, ECID 123456789,
+6 GiB RAM and one CPU, Mac requested restart after 2,946 blocks and Android
+after 2,955. Both stopped at PC `0x104518`, ESR `0x56000000`, ELR `0x1044f0`.
+The small block-count difference has not been traced instruction by instruction.
+DFU is also silent until a USB host sends requests; it is not a serial boot log.
+Both hosts returned this descriptor after a successful reset:
+
+```
+12 01 00 02 00 00 00 40 ac 05 27 12 00 00 02 03 04 01
+```
+
+Mac additionally read `Apple Mobile Device (DFU Mode)` and
+`SRTG:[iBoot-10151.140.19]`. Android's bounded probe stopped after 3,068 blocks.
+An idle Android DFU run used 88,100 KiB RSS (43 threads, 6 GiB guest RAM).
+These observations do not establish an installed kernel boot.
+
+Device test files now stay under `/data/local/tmp/menhir/engine-tests/` and are
+removed by the runner. No app installation or emulator is needed.
+
+Reproduction (the shell commands below are for the tablet, after copying
+`hengevm`, `menhir-fetch` and the verified ROM into its work directory):
+
+```
+cd /data/local/tmp/menhir
+chmod 700 hengevm menhir-fetch
+# New storage only: do not truncate an existing installed machine.
+truncate -s 48G disk.img
+printf '\245\325\263\376\227\255\035\047\001\000\000\000\000\000\000\000\001\000\000\000\000\000\000\000' > aux.bin
+truncate -s 33570816 aux.bin
+HV_NO_SOUND=1 HV_VUSB_PROBE=1 ./hengevm --rom AVPBooter.vmapple2.bin \
+  --disk disk.img --aux aux.bin --ecid 123456789 --ram 6144 --installer
+nohup ./menhir-fetch image \
+  https://updates.cdn-apple.com/2025SummerFCS/fullrestores/093-10809/CFD6DD38-DAF0-40DA-854F-31AAD1294C6F/UniversalMac_15.6.1_24G90_Restore.ipsw \
+  Sequoia_15.6.1_24G90.ipsw > fetch.log 2>&1 < /dev/null &
+# Wait for state=1 and the completed file before starting restore.
+nohup env HV_NO_SOUND=1 HV_INSTALL_LOG=1 ./hengevm \
+  --rom AVPBooter.vmapple2.bin --disk disk.img --aux aux.bin \
+  --ecid 123456789 --ram 6144 --cpus 1 --stats 5 \
+  --install Sequoia_15.6.1_24G90.ipsw > install.log 2>&1 < /dev/null &
+```
+
+The same ECID, disk, aux and default 16,384-byte auxiliary offset must be used
+on subsequent boots. Remove `--install ...` to boot the installed disk, and
+write that run to `boot.log`. These install/boot commands are the intended
+procedure; completion is not yet verified. Monitor `du -sk .` as well as
+`/proc/PID/status`, and stop if allocated storage approaches 60 GiB. A sparse
+disk's logical length is not its allocated storage.
