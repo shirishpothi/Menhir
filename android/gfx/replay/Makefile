@@ -20,3 +20,10 @@ $(O):
 	mkdir -p $(O)
 
 .PHONY: all
+
+# The descriptor parser against Metal's own serializer.
+test-desc: $(O)/test_desc
+	$(O)/test_desc
+$(O)/test_desc: android/gfx/tests/test_desc.m devices/pvg_vulkan_desc.c devices/pvg_vulkan_desc.h | $(O)
+	$(CC) -fobjc-arc -O2 -g -Wall -Idevices android/gfx/tests/test_desc.m devices/pvg_vulkan_desc.c -framework Metal -framework Foundation -o $@
+.PHONY: test-desc
