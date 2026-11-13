@@ -250,8 +250,9 @@ kill was observed. The original `stayon` setting, 0, was restored after stopping
 Stopping exposed a restore-library exit-handler race (`FORTIFY: pthread_mutex_lock
 called on a destroyed mutex`). The CLI now uses `_exit` after draining disk
 workers and flushing disks, avoiding exit handlers while detached restore workers
-still own USB pointers. This shutdown fix compiles; a second full restore has not
-been run to verify it at the same stage.
+still own USB pointers. The shutdown fix built and a tablet smoke run on separate disposable storage
+returned exit 1 after a missing-IPSW failure and SIGTERM, without FORTIFY. A
+second full restore has not been run to verify it at the same stage.
 
 Retained under `/data/local/tmp/menhir/`:
 
